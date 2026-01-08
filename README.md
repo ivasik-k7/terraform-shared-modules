@@ -24,13 +24,13 @@ module "aurora" {
   cluster_identifier = "my-database"
   engine             = "aurora-postgresql"
   engine_version     = "15.3"
-  
+
   vpc_id             = aws_vpc.main.id
   subnet_ids         = aws_subnet.private[*].id
-  
+
   master_username    = "admin"
   master_password    = var.db_password  # Use var.sensitive = true
-  
+
   tags = {
     Environment = "production"
     Project     = "my-app"
@@ -43,9 +43,11 @@ See module-specific READMEs for detailed configuration options and examples.
 ## Available Modules
 
 ### 📊 [Aurora](./aurora)
+
 Managed relational database with high availability and disaster recovery.
 
 **Key Features:**
+
 - Multi-AZ deployments with automatic failover
 - Global database for cross-region replication
 - Serverless v2 auto-scaling
@@ -58,9 +60,11 @@ Managed relational database with high availability and disaster recovery.
 ---
 
 ### 🐳 [ECR](./ecr)
+
 Elastic Container Registry for managing Docker container images.
 
 **Key Features:**
+
 - Private repositories with fine-grained access control
 - Image lifecycle policies for cost optimization
 - Image scanning with vulnerability detection
@@ -72,9 +76,11 @@ Elastic Container Registry for managing Docker container images.
 ---
 
 ### ☸️ [EKS](./eks)
+
 Amazon Elastic Kubernetes Service for managed container orchestration.
 
 **Key Features:**
+
 - Managed Kubernetes control plane
 - Auto-scaling node groups with Spot instance support
 - IAM Roles for Service Accounts (IRSA)
@@ -127,7 +133,7 @@ Each module enforces:
 ✅ **Observability** - CloudWatch monitoring, logging, and alarms included  
 ✅ **Backup & Recovery** - Automated backups with retention policies  
 ✅ **Versioning** - Explicit provider and resource versioning  
-✅ **Tagging Strategy** - Consistent tagging across all resources  
+✅ **Tagging Strategy** - Consistent tagging across all resources
 
 ## Requirements
 
@@ -136,7 +142,7 @@ Each module enforces:
 ```hcl
 terraform {
   required_version = ">= 1.3.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -218,6 +224,7 @@ terraform apply -var-file="prod.tfvars"
 ## Module Documentation
 
 Each module includes:
+
 - Detailed `README.md` with examples
 - Input variables with descriptions and validations
 - Output values for resource information
@@ -247,6 +254,7 @@ See individual module directories for complete documentation.
 ### Testing
 
 Before submitting changes:
+
 - Run `terraform validate` on all modules
 - Check for syntax errors with `terraform fmt -check`
 - Review security implications
@@ -257,15 +265,18 @@ Before submitting changes:
 ### Common Issues
 
 **"Provider version not available"**
+
 - Run `terraform init -upgrade` to fetch latest compatible version
 - Check [AWS Provider Changelog](https://github.com/hashicorp/terraform-provider-aws/releases)
 
 **"AWS credentials not found"**
+
 - Verify AWS credentials: `aws sts get-caller-identity`
 - Check environment variables: `$AWS_ACCESS_KEY_ID`, `$AWS_SECRET_ACCESS_KEY`
 - Confirm IAM permissions for required services
 
 **"Resource already exists"**
+
 - Check current infrastructure: `terraform state list`
 - Use `terraform import` to manage existing resources
 - Review AWS Console for unmanaged resources
@@ -284,6 +295,7 @@ For module-specific issues, see the module's README file.
 ### Reporting Issues
 
 Include:
+
 - Module name and version
 - Error message and logs
 - Configuration snippet (without secrets)
@@ -309,12 +321,14 @@ This project is provided as-is for infrastructure management. Review licensing t
 ## Maintenance
 
 Modules are maintained to support:
+
 - Latest Terraform versions
 - AWS provider updates (typically within 30 days of release)
 - Security patches and vulnerability fixes
 - AWS service deprecations and new features
 
 Regular updates recommended to benefit from:
+
 - Enhanced security controls
 - Performance optimizations
 - New AWS service capabilities

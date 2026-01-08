@@ -8,7 +8,3 @@ terraform {
     }
   }
 }
-
-provider "aws" {
-  # Configuration is inherited from parent
-}

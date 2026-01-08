@@ -22,11 +22,6 @@ output "registry_id" {
   value       = aws_ecr_repository.this.registry_id
 }
 
-output "repository_id" {
-  description = "The numeric ID of the repository"
-  value       = aws_ecr_repository.this.id
-}
-
 ################################################################################
 # Repository Configuration Information
 ################################################################################
@@ -56,14 +51,15 @@ output "encryption_configuration" {
 # Policy Information
 ################################################################################
 
-output "repository_policy_arn" {
-  description = "The ARN of the repository policy (if created)"
-  value       = try(aws_ecr_repository_policy.this[0].arn, null)
-}
+# output "repository_policy_arn" {
+#   description = "The ARN of the repository policy (if created)"
+#   value       = try(aws_ecr_repository_policy.this[0].arn, null)
+# }
 
-output "repository_policy_created" {
-  description = "Whether a repository policy was created"
-  value       = var.create_repository_policy
+output "repository_policy_statements" {
+  description = "The combined policy statements for the repository (custom + auto-generated)"
+  value       = var.create_repository_policy ? local.all_policy_statements : []
+  sensitive   = true
 }
 
 ################################################################################
@@ -77,7 +73,7 @@ output "lifecycle_policy_created" {
 
 output "lifecycle_rules" {
   description = "The lifecycle rules applied to the repository"
-  value       = var.enable_lifecycle_policy ? local.lifecycle_rules_final : []
+  value       = var.enable_lifecycle_policy ? var.lifecycle_rules : []
 }
 
 ################################################################################

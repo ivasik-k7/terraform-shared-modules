@@ -23,6 +23,12 @@ variable "image_tag_mutability" {
   }
 }
 
+variable "force_delete" {
+  description = "If true, forces the deletion of the repository even if it contains images"
+  type        = bool
+  default     = false
+}
+
 ################################################################################
 # Image Scanning Configuration
 ################################################################################
@@ -31,16 +37,6 @@ variable "scan_on_push" {
   description = "Indicates whether images are scanned for vulnerabilities after being pushed to the repository"
   type        = bool
   default     = true
-}
-
-variable "scan_on_push_filters" {
-  description = "Configuration for enhanced image scanning. When enabled, provides more detailed vulnerability information."
-  type = object({
-    enabled       = optional(bool, false)
-    filter_type   = optional(string, "INCLUDE") # INCLUDE or EXCLUDE
-    filter_values = optional(list(string), [])
-  })
-  default = {}
 }
 
 ################################################################################
@@ -75,48 +71,19 @@ variable "enable_lifecycle_policy" {
 }
 
 variable "lifecycle_rules" {
-  description = "Lifecycle rules for managing image retention. Allows custom rules for different image tag patterns and counts."
+  description = "Lifecycle policy rules"
   type = list(object({
-    rule_priority   = number
-    description     = string
-    tag_status      = optional(string, "untagged") # untagged, tagged, any
-    tag_prefix_list = optional(list(string), [])
-    count_type      = optional(string, "sinceImagePushed") # sinceImagePushed, imageCountMoreThan
-    count_unit      = optional(string, "days")             # days, imageCountMoreThan
-    count_number    = optional(number)
-    action_type     = optional(string, "expire") # expire or copy
+    rule_priority    = number
+    description      = string
+    tag_status       = string
+    tag_prefix_list  = optional(list(string), [])
+    tag_pattern_list = optional(list(string), [])
+    count_type       = string
+    count_number     = number
+    count_unit       = optional(string, "days")
+    action_type      = string
   }))
-  default = [
-    {
-      rule_priority = 1
-      description   = "Expire untagged images older than 7 days"
-      tag_status    = "untagged"
-      count_type    = "sinceImagePushed"
-      count_unit    = "days"
-      count_number  = 7
-      action_type   = "expire"
-    },
-    {
-      rule_priority = 2
-      description   = "Keep last 100 tagged images"
-      tag_status    = "any"
-      count_type    = "imageCountMoreThan"
-      count_number  = 100
-      action_type   = "expire"
-    }
-  ]
-}
-
-variable "untagged_image_retention_days" {
-  description = "DEPRECATED: Use lifecycle_rules instead. Number of days to keep untagged images before expiration."
-  type        = number
-  default     = null
-}
-
-variable "max_image_count" {
-  description = "DEPRECATED: Use lifecycle_rules instead. Maximum number of tagged images to keep in the repository."
-  type        = number
-  default     = null
+  default = []
 }
 
 ################################################################################
@@ -152,7 +119,7 @@ variable "repository_policy_statements" {
       effect = "Allow"
       principals = {
         type        = "AWS"
-        identifiers = [] # Will be auto-populated with current account root
+        identifiers = []
       }
       actions = [
         "ecr:GetDownloadUrlForLayer",
@@ -243,6 +210,66 @@ variable "cloudwatch_log_retention_days" {
     error_message = "cloudwatch_log_retention_days must be a valid CloudWatch retention period."
   }
 }
+
+variable "cloudwatch_kms_key_id" {
+  description = "The KMS key ID to use for encrypting CloudWatch log data. Only used if enable_logging is true."
+  type        = string
+  default     = null
+}
+
+################################################################################
+# Registry Scanning Configuration
+################################################################################
+
+variable "enable_registry_scanning" {
+  description = "Enable enhanced scanning at the registry level"
+  type        = bool
+  default     = false
+}
+
+variable "registry_scan_type" {
+  description = "Scanning type to set for the registry (BASIC or ENHANCED)"
+  type        = string
+  default     = "ENHANCED"
+
+  validation {
+    condition     = contains(["BASIC", "ENHANCED"], var.registry_scan_type)
+    error_message = "Registry scan type must be either BASIC or ENHANCED."
+  }
+}
+
+variable "registry_scanning_rules" {
+  description = "Registry scanning rules"
+  type = list(object({
+    scan_frequency    = string
+    repository_filter = string
+    filter_type       = string
+  }))
+  default = []
+}
+
+variable "pull_through_cache_rules" {
+  description = "Pull through cache rules for upstream registries"
+  type = map(object({
+    ecr_repository_prefix = string
+    upstream_registry_url = string
+    credential_arn        = optional(string)
+  }))
+  default = {}
+}
+
+variable "enable_registry_policy" {
+  description = "Enable registry-level policy"
+  type        = bool
+  default     = false
+}
+
+variable "registry_policy_json" {
+  description = "JSON policy document for registry-level permissions"
+  type        = string
+  default     = null
+}
+
 
 ################################################################################
 # Tags and Metadata

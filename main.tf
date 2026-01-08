@@ -14,124 +14,163 @@ terraform {
 }
 
 provider "aws" {
-  region = "eu-west-1"
+  region = "us-west-1"
 }
+
+################################################################################
+# Project Configuration - archon-hub
+################################################################################
 
 locals {
-  cluster_name = "my-app-dev"
+  project_name = "archon-hub"
   environment  = "dev"
 
-  tags = {
-    Environment = "dev"
-    Project     = "my-app"
+  name_prefix = "${local.project_name}-${local.environment}"
+
+  ecr_repository_name = "${local.name_prefix}-master-application"
+
+  lifecycle_rules = [
+    {
+      rule_priority    = 1
+      description      = "Keep last 10 production images"
+      tag_status       = "tagged"
+      tag_prefix_list  = ["prod-", "production-"]
+      tag_pattern_list = []
+      count_type       = "imageCountMoreThan"
+      count_number     = 10
+      action_type      = "expire"
+    },
+    {
+      rule_priority    = 2
+      description      = "Expire dev images older than 7 days"
+      tag_status       = "tagged"
+      tag_prefix_list  = ["dev-", "test-"]
+      tag_pattern_list = []
+      count_type       = "sinceImagePushed"
+      count_number     = 7
+      count_unit       = "days"
+      action_type      = "expire"
+    },
+    {
+      rule_priority    = 3
+      description      = "Expire untagged images older than 14 days"
+      tag_status       = "untagged"
+      tag_prefix_list  = []
+      tag_pattern_list = []
+      count_type       = "sinceImagePushed"
+      count_number     = 14
+      count_unit       = "days"
+      action_type      = "expire"
+    },
+    {
+      rule_priority    = 4
+      description      = "Keep last 30 images (catch-all)"
+      tag_status       = "any"
+      tag_prefix_list  = []
+      tag_pattern_list = []
+      count_type       = "imageCountMoreThan"
+      count_number     = 30
+      action_type      = "expire"
+    }
+  ]
+
+  base_tags = {
+    Project     = local.project_name
+    Environment = local.environment
     ManagedBy   = "Terraform"
-    Owner       = "devops-team"
+    CreatedDate = "2026-01-08"
+    CostCenter  = "engineering"
   }
+
+  ecr_tags = merge(
+    local.base_tags,
+    {
+      Service     = "ecr"
+      Application = "container-registry"
+      Team        = "platform"
+      Owner       = "devops-team"
+    }
+  )
+
+  enable_image_scanning = true      # FREE: 1 basic scan per push
+  enable_logging        = false     # COST: Avoid CloudWatch charges
+  enable_replication    = false     # COST: Avoid data transfer charges
+  encryption_type       = "AES256"  # FREE: AWS-managed encryption
+  image_tag_mutability  = "MUTABLE" # FREE: Reuse tags, save storage
+  force_delete          = true      # DEV: Allow easy cleanup
 }
 
 ################################################################################
-# VPC Data (assuming VPC already exists)
+# ECR Module - archon-hub Container Registry
 ################################################################################
 
-data "aws_vpc" "main" {
-  filter {
-    name   = "tag:Name"
-    values = ["dev-vpc"]
-  }
+module "ecr" {
+  source = "./ecr"
+
+  repository_name      = local.ecr_repository_name
+  image_tag_mutability = local.image_tag_mutability
+  force_delete         = local.force_delete
+
+  scan_on_push = local.enable_image_scanning
+
+  encryption_type = local.encryption_type
+  kms_key_arn     = null
+
+  enable_lifecycle_policy = true
+  lifecycle_rules         = local.lifecycle_rules
+
+  create_repository_policy     = true
+  repository_policy_statements = [] # Use default account access
+  allowed_principals           = [] # No cross-account = no data transfer costs
+  allowed_pull_principals      = []
+
+  enable_replication = local.enable_replication
+  replication_rules  = []
+
+  enable_logging                = local.enable_logging
+  cloudwatch_log_group_name     = null
+  cloudwatch_log_retention_days = 7
+  cloudwatch_kms_key_id         = null
+
+  enable_registry_scanning = false
+  registry_scan_type       = "BASIC"
+  registry_scanning_rules  = []
+
+  pull_through_cache_rules = {}
+
+  enable_registry_policy = false
+  registry_policy_json   = null
+
+  tags        = local.ecr_tags
+  common_tags = local.base_tags
 }
 
-data "aws_subnets" "private" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.main.id]
-  }
+################################################################################
+# Outputs
+################################################################################
 
-  filter {
-    name   = "tag:Type"
-    values = ["private"]
-  }
+output "repository_url" {
+  description = "ECR Repository URL"
+  value       = module.ecr.repository_url
 }
 
-################################################################################
-# EKS Cluster - Development Configuration
-################################################################################
+output "repository_arn" {
+  description = "ECR Repository ARN"
+  value       = module.ecr.repository_arn
+}
 
-module "eks" {
-  source = "../../modules/eks"
+output "repository_name" {
+  description = "ECR Repository Name"
+  value       = module.ecr.repository_name
+}
 
-  cluster_name    = local.cluster_name
-  cluster_version = "1.28"
-  environment     = local.environment
+output "registry_id" {
+  description = "AWS Account ID (Registry ID)"
+  value       = module.ecr.registry_id
+}
 
-  vpc_id     = data.aws_vpc.main.id
-  subnet_ids = data.aws_subnets.private.ids
-
-  # Development: Allow public access from office IP for easy access
-  cluster_endpoint_private_access      = true
-  cluster_endpoint_public_access       = true
-  cluster_endpoint_public_access_cidrs = ["203.0.113.0/24"] # Replace with your office IP
-
-  # Development: Basic logging
-  cluster_enabled_log_types              = ["api", "audit"]
-  cloudwatch_log_group_retention_in_days = 7
-
-  # Development: Enable encryption but allow quick setup
-  enable_cluster_encryption = true
-  enable_irsa               = true
-
-  # Development: Single small node group for cost optimization
-  node_groups = {
-    general = {
-      desired_size   = 2
-      min_size       = 1
-      max_size       = 4
-      instance_types = ["t3.medium"]
-      capacity_type  = "SPOT" # Use SPOT for dev to save costs
-      disk_size      = 30
-
-      labels = {
-        role        = "general"
-        environment = "dev"
-      }
-    }
-  }
-
-  # Development: Essential addons only
-  cluster_addons = {
-    vpc-cni = {
-      version           = "v1.15.1-eksbuild.1"
-      resolve_conflicts = "OVERWRITE"
-    }
-    coredns = {
-      version           = "v1.10.1-eksbuild.2"
-      resolve_conflicts = "OVERWRITE"
-    }
-    kube-proxy = {
-      version           = "v1.28.1-eksbuild.1"
-      resolve_conflicts = "OVERWRITE"
-    }
-  }
-
-  # Development: Enable common IRSA roles
-  enable_cluster_autoscaler           = true
-  enable_ebs_csi_driver               = true
-  enable_aws_load_balancer_controller = true
-
-  # Development: Allow developers access
-  access_entries = {
-    dev_team = {
-      principal_arn = "arn:aws:iam::123456789012:role/DevTeamRole"
-      type          = "STANDARD"
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = {
-            type = "cluster"
-          }
-        }
-      }
-    }
-  }
-
-  tags = local.tags
+output "repository_policy_statements" {
+  description = "Repository Policy Statements"
+  value       = module.ecr.repository_policy_statements
+  sensitive   = true
 }
