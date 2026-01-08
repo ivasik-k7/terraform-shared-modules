@@ -387,6 +387,18 @@ variable "backup_retention_period" {
   }
 }
 
+variable "backup_encryption_key_id" {
+  description = "The KMS key ARN for encrypting backups"
+  type        = string
+  default     = null
+}
+
+variable "enable_automated_backup" {
+  description = "Enable or disable automated backups"
+  type        = bool
+  default     = true
+}
+
 variable "preferred_backup_window" {
   description = "The daily time range during which automated backups are created"
   type        = string
@@ -440,6 +452,17 @@ variable "enabled_cloudwatch_logs_exports" {
   default     = []
 }
 
+variable "cloudwatch_log_retention_days" {
+  description = "CloudWatch log retention period in days"
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653], var.cloudwatch_log_retention_days)
+    error_message = "Log retention days must be a valid CloudWatch Logs retention period."
+  }
+}
+
 variable "monitoring_interval" {
   description = "The interval, in seconds, between points when Enhanced Monitoring metrics are collected"
   type        = number
@@ -482,23 +505,98 @@ variable "performance_insights_retention_period" {
 }
 
 # ============================================================================
+# CLOUDWATCH ALARMS - THRESHOLDS
+# ============================================================================
+
+variable "alarm_cpu_threshold_percent" {
+  description = "CPU utilization threshold for CloudWatch alarm (percent)"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.alarm_cpu_threshold_percent > 0 && var.alarm_cpu_threshold_percent <= 100
+    error_message = "CPU threshold must be between 1 and 100 percent."
+  }
+}
+
+variable "alarm_connections_threshold" {
+  description = "Database connections threshold for CloudWatch alarm"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.alarm_connections_threshold > 0
+    error_message = "Connections threshold must be greater than 0."
+  }
+}
+
+variable "alarm_free_storage_space_bytes" {
+  description = "Free storage space threshold in bytes for CloudWatch alarm (default: 1 GB)"
+  type        = number
+  default     = 1073741824
+
+  validation {
+    condition     = var.alarm_free_storage_space_bytes > 0
+    error_message = "Free storage space threshold must be greater than 0."
+  }
+}
+
+variable "alarm_replica_lag_milliseconds" {
+  description = "Replica lag threshold in milliseconds for CloudWatch alarm (default: 1000ms)"
+  type        = number
+  default     = 1000
+
+  validation {
+    condition     = var.alarm_replica_lag_milliseconds > 0
+    error_message = "Replica lag threshold must be greater than 0."
+  }
+}
+
+variable "create_alarms" {
+  description = "Whether to create CloudWatch alarms"
+  type        = bool
+  default     = true
+}
+
+# ============================================================================
 # GLOBAL DATABASE (OPTIONAL)
 # ============================================================================
 
-variable "is_global_cluster" {
-  description = "Whether this is a global Aurora database"
+variable "enable_global_cluster" {
+  description = "Whether to create a global Aurora database cluster"
   type        = bool
   default     = false
 }
 
 variable "global_cluster_identifier" {
-  description = "The global cluster identifier for Aurora Global Database"
+  description = "The global cluster identifier for Aurora Global Database. Required when enable_global_cluster = true"
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.global_cluster_identifier == null || (
+      length(var.global_cluster_identifier) >= 1 &&
+      length(var.global_cluster_identifier) <= 63 &&
+      can(regex("^[a-zA-Z][a-zA-Z0-9-]*$", var.global_cluster_identifier))
+    )
+    error_message = "Global cluster identifier must be 1-63 characters, start with a letter, and contain only alphanumeric characters and hyphens."
+  }
+}
+
+variable "is_primary_region" {
+  description = "Whether this is the primary region for the global cluster"
+  type        = bool
+  default     = true
+}
+
+variable "source_db_cluster_identifier" {
+  description = "The DB cluster identifier of the source cluster for secondary region"
   type        = string
   default     = null
 }
 
 variable "source_region" {
-  description = "Source region for Aurora Global Database replica"
+  description = "Source region for Aurora Global Database secondary cluster"
   type        = string
   default     = null
 }
