@@ -97,10 +97,6 @@ output "cluster_instance_endpoints" {
   value       = { for k, v in aws_rds_cluster_instance.instances : k => v.endpoint }
 }
 
-output "cluster_instance_resource_ids" {
-  description = "Resource IDs of the cluster instances"
-  value       = { for k, v in aws_rds_cluster_instance.instances : k => v.resource_id }
-}
 
 # ============================================================================
 # CLUSTER MEMBERS

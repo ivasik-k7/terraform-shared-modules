@@ -14,7 +14,22 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-west-1"
+  region = "us-east-1"
+}
+
+################################################################################
+# Data Sources
+################################################################################
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
 }
 
 ################################################################################
@@ -105,6 +120,7 @@ locals {
 ################################################################################
 
 module "ecr" {
+  count  = 0
   source = "./ecr"
 
   repository_name      = local.ecr_repository_name
@@ -146,31 +162,108 @@ module "ecr" {
 }
 
 ################################################################################
+# Aurora Module - archon-hub Database Cluster
+################################################################################
+
+module "aurora" {
+  count              = 0
+  source             = "./aurora"
+  cluster_identifier = "${local.name_prefix}-db-cluster"
+  engine             = "aurora-postgresql"
+  engine_version     = "14.6"
+
+  instances = {
+    "writer" = {
+      instance_class      = "db.t3.medium"
+      promotion_tier      = 0
+      publicly_accessible = false
+    }
+  }
+
+  master_username = "archonadmin"
+  master_password = "ChangeMe12345!"
+
+  storage_encrypted       = true
+  backup_retention_period = 1
+  skip_final_snapshot     = true
+  deletion_protection     = false
+
+  monitoring_interval             = 0
+  performance_insights_enabled    = false
+  enabled_cloudwatch_logs_exports = []
+
+  create_security_group = true
+  allowed_cidr_blocks   = ["10.0.0.0/16"]
+
+  vpc_id     = data.aws_vpc.default.id
+  subnet_ids = data.aws_subnets.default.ids
+
+  tags = local.base_tags
+}
+
+################################################################################
+# EFS
+################################################################################
+
+module "efs" {
+  source = "./efs"
+
+  name             = "${local.name_prefix}-file-system"
+  encrypted        = true
+  throughput_mode  = "bursting"
+  performance_mode = "generalPurpose"
+
+  vpc_id             = data.aws_vpc.default.id
+  subnet_ids         = data.aws_subnets.default.ids
+  security_group_ids = []
+
+  create_security_group = true
+  allowed_cidr_blocks   = ["10.0.0.0/16"]
+
+  enable_backup_policy = true
+
+  lifecycle_policy_transition_to_ia                    = "AFTER_30_DAYS"
+  lifecycle_policy_transition_to_primary_storage_class = "AFTER_1_ACCESS"
+
+  tags = merge(
+    local.base_tags,
+    {
+      Service     = "efs"
+      Application = "file-storage"
+      Team        = "platform"
+      Owner       = "devops-team"
+    }
+  )
+
+}
+
+
+################################################################################
 # Outputs
 ################################################################################
 
-output "repository_url" {
-  description = "ECR Repository URL"
-  value       = module.ecr.repository_url
-}
+# output "repository_url" {
+#   description = "ECR Repository URL"
+#   value       = module.ecr.repository_url
+# }
 
-output "repository_arn" {
-  description = "ECR Repository ARN"
-  value       = module.ecr.repository_arn
-}
+# output "repository_arn" {
+#   description = "ECR Repository ARN"
+#   value       = module.ecr.repository_arn
+# }
 
-output "repository_name" {
-  description = "ECR Repository Name"
-  value       = module.ecr.repository_name
-}
+# output "repository_name" {
+#   description = "ECR Repository Name"
+#   value       = module.ecr.repository_name
+# }
 
-output "registry_id" {
-  description = "AWS Account ID (Registry ID)"
-  value       = module.ecr.registry_id
-}
+# output "registry_id" {
+#   description = "AWS Account ID (Registry ID)"
+#   value       = module.ecr.registry_id
+# }
 
-output "repository_policy_statements" {
-  description = "Repository Policy Statements"
-  value       = module.ecr.repository_policy_statements
-  sensitive   = true
-}
+# output "repository_policy_statements" {
+#   description = "Repository Policy Statements"
+#   value       = module.ecr.repository_policy_statements
+#   sensitive   = true
+# }

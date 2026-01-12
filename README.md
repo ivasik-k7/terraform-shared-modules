@@ -92,7 +92,25 @@ Amazon Elastic Kubernetes Service for managed container orchestration.
 
 ---
 
-### 🗺️ Planned Modules
+### � [EFS](./efs)
+
+Elastic File System for shared NFS storage across EC2 and containers.
+
+**Key Features:**
+
+- Multi-zone file system with automatic failover
+- Optional auto-created security group with configurable access
+- Lifecycle policies for cost optimization (Standard → IA → Archive)
+- Access points for application-specific mounting
+- Cross-region replication for disaster recovery
+- Automated backup policies
+- Support for both multi-zone and one-zone deployments
+
+**Use Case:** Shared storage for containerized applications, NFS mount targets for EKS/EC2
+
+---
+
+### �🗺️ Planned Modules
 
 - **S3** - Object storage with lifecycle policies and replication
 - **CloudFront** - Global CDN with WAF integration
@@ -306,6 +324,7 @@ Include:
 - [x] Aurora DB module with full HA and monitoring
 - [x] ECR module with image scanning and replication
 - [x] EKS module with managed node groups
+- [x] EFS module with mount targets and lifecycle policies
 - [ ] S3 module with lifecycle and replication policies
 - [ ] CloudFront distribution with WAF integration
 - [ ] Route53 for DNS and traffic management
