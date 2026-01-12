@@ -121,7 +121,7 @@ locals {
 
 module "ecr" {
   count  = 0
-  source = "./ecr"
+  source = "./modules/ecr"
 
   repository_name      = local.ecr_repository_name
   image_tag_mutability = local.image_tag_mutability
@@ -167,7 +167,7 @@ module "ecr" {
 
 module "aurora" {
   count              = 0
-  source             = "./aurora"
+  source             = "./modules/aurora"
   cluster_identifier = "${local.name_prefix}-db-cluster"
   engine             = "aurora-postgresql"
   engine_version     = "14.6"
@@ -207,7 +207,7 @@ module "aurora" {
 
 module "efs" {
   count  = 0
-  source = "./efs"
+  source = "./modules/efs"
 
   name             = "${local.name_prefix}-file-system"
   encrypted        = true
@@ -244,7 +244,7 @@ module "efs" {
 
 module "sqs" {
   count  = 0
-  source = "./sqs"
+  source = "./modules/sqs"
 
   name = "${local.name_prefix}-main-queue"
 
