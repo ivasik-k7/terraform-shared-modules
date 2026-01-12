@@ -59,7 +59,7 @@ Managed relational database with high availability and disaster recovery.
 
 ---
 
-### 🐳 [ECR](./ecr)
+### 🐳 [ECR](./modules/ecr)
 
 Elastic Container Registry for managing Docker container images.
 
@@ -75,7 +75,7 @@ Elastic Container Registry for managing Docker container images.
 
 ---
 
-### ☸️ [EKS](./eks)
+### ☸️ [EKS](./modules/eks)
 
 Amazon Elastic Kubernetes Service for managed container orchestration.
 
@@ -92,7 +92,7 @@ Amazon Elastic Kubernetes Service for managed container orchestration.
 
 ---
 
-### � [EFS](./efs)
+### � [EFS](./modules/efs)
 
 Elastic File System for shared NFS storage across EC2 and containers.
 
@@ -107,6 +107,30 @@ Elastic File System for shared NFS storage across EC2 and containers.
 - Support for both multi-zone and one-zone deployments
 
 **Use Case:** Shared storage for containerized applications, NFS mount targets for EKS/EC2
+
+---
+
+### 📨 [SQS](./modules/sqs)
+
+Simple Queue Service for decoupling microservices and managing distributed message workloads.
+
+**Key Features:**
+
+- **Dual Queue Support:** Provision either **Standard** (best-effort ordering, maximum throughput) or **FIFO** (exactly-once processing, strict ordering) queues.
+- **Built-in Dead Letter Queue (DLQ):** Optional automated DLQ creation with configurable `max_receive_count` to isolate and troubleshoot poisonous messages.
+- **Cost-Optimized Encryption:** Supports both **SSE-SQS** (free-tier optimized, managed by SQS) and **SSE-KMS** (customer-managed keys) for compliance.
+- **Efficiency Controls:** Native support for **Long Polling** (`receive_wait_time_seconds`) to reduce empty receive requests and lower AWS costs.
+- **Flexible FIFO Logic:** Configurable `deduplication_scope` and `throughput_limit` (per queue or message group) to scale high-order requirements.
+- **Automated Naming:** Intelligently handles the mandatory `.fifo` suffix for both primary and dead-letter queues.
+- **Granular Access Control:** Integrated `queue_policy` support for cross-account access and resource-based IAM permissions.
+
+**Use Case:** Decoupling microservices, asynchronous task processing, buffering bursty workloads, and implementing event-driven architectures.
+
+---
+
+#### Free Tier Tip 💡
+
+To stay under the **1 Million Free Requests** per month, this module is optimized to use **Long Polling (20s)** and **SQS-Managed Encryption**. This combination provides maximum power and security without consuming KMS budget or inflating API request counts.
 
 ---
 
