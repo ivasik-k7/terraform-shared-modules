@@ -206,6 +206,7 @@ module "aurora" {
 ################################################################################
 
 module "efs" {
+  count  = 0
   source = "./efs"
 
   name             = "${local.name_prefix}-file-system"
@@ -235,6 +236,38 @@ module "efs" {
     }
   )
 
+}
+
+################################################################################
+# SQS
+################################################################################
+
+module "sqs" {
+  count  = 0
+  source = "./sqs"
+
+  name = "${local.name_prefix}-main-queue"
+
+  create_dlq                    = true
+  message_retention_seconds     = 1209600
+  dlq_message_retention_seconds = 1209600
+
+  max_receive_count         = 5
+  receive_wait_time_seconds = 20
+  fifo_queue                = false
+
+  sqs_managed_sse_enabled = true
+  kms_master_key_id       = null
+
+  tags = merge(
+    local.base_tags,
+    {
+      Service     = "sqs"
+      Application = "message-queue"
+      Team        = "platform"
+      Owner       = "devops-team"
+    }
+  )
 }
 
 
