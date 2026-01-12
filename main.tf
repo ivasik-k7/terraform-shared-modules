@@ -2,6 +2,13 @@
 # Development Environment Example
 ################################################################################
 
+variable "region" {
+  description = "AWS region to deploy resources"
+  type        = string
+  default     = "us-east-1"
+
+}
+
 terraform {
   required_version = ">= 1.6.0"
 
@@ -14,7 +21,7 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region = var.region
 }
 
 ################################################################################
@@ -270,33 +277,51 @@ module "sqs" {
   )
 }
 
-
 ################################################################################
-# Outputs
+# Network-Hub Module - archon-hub VPC and Networking
 ################################################################################
 
-# output "repository_url" {
-#   description = "ECR Repository URL"
-#   value       = module.ecr.repository_url
-# }
 
-# output "repository_arn" {
-#   description = "ECR Repository ARN"
-#   value       = module.ecr.repository_arn
-# }
+module "network-hub" {
+  count  = 0
+  source = "./modules/network-hub"
 
-# output "repository_name" {
-#   description = "ECR Repository Name"
-#   value       = module.ecr.repository_name
-# }
+  name        = local.project_name
+  environment = local.environment
 
-# output "registry_id" {
-#   description = "AWS Account ID (Registry ID)"
-#   value       = module.ecr.registry_id
-# }
+  vpc_id = data.aws_vpc.default.id
 
-# output "repository_policy_statements" {
-#   description = "Repository Policy Statements"
-#   value       = module.ecr.repository_policy_statements
-#   sensitive   = true
-# }
+  public_subnet_ids = data.aws_subnets.default.ids
+
+  create_internet_gateway = false
+
+  security_groups = {
+    web_tier = {
+      description = "Web tier security group"
+      ingress_rules = [
+        {
+          description = "HTTP from anywhere"
+          from_port   = 80
+          to_port     = 80
+          protocol    = "tcp"
+          cidr_blocks = ["0.0.0.0/0"]
+        },
+        {
+          description = "HTTPS from anywhere"
+          from_port   = 443
+          to_port     = 443
+          protocol    = "tcp"
+          cidr_blocks = ["0.0.0.0/0"]
+        }
+      ]
+    }
+  }
+
+  vpc_endpoints = {
+    s3 = {
+      service_name      = "com.amazonaws.${var.region}.s3"
+      vpc_endpoint_type = "Gateway"
+      route_table_ids   = [data.aws_vpc.default.main_route_table_id]
+    }
+  }
+}
