@@ -92,7 +92,7 @@ Amazon Elastic Kubernetes Service for managed container orchestration.
 
 ---
 
-### � [EFS](./modules/efs)
+### 📂 [EFS](./modules/efs)
 
 Elastic File System for shared NFS storage across EC2 and containers.
 
@@ -128,13 +128,45 @@ Simple Queue Service for decoupling microservices and managing distributed messa
 
 ---
 
+### 📨 [SNS](./modules/sns)
+
+Simple Notification Service for pub/sub messaging and mobile notifications.
+
+**Key Features:**
+
+- Standard and FIFO topics
+- Delivery status logging
+- SMS and Mobile Push support
+- Message filtering and fanout patterns
+- Encrypted topics
+
+**Use Case:** Event-driven architectures, user notifications, fanout to queues
+
+---
+
+### 🌐 [Network Hub](./modules/network-hub)
+
+Enterprise-grade VPC module for centralized network infrastructure.
+
+**Key Features:**
+
+- Multi-AZ VPC with public/private/db subnets
+- Transit Gateway integration ready
+- VPC Peering and Endpoints
+- Flow Logs and DNS configuration
+- Flexible NAT Gateway strategies
+
+**Use Case:** Landing zone network foundation, hub-and-spoke architectures
+
+---
+
 #### Free Tier Tip 💡
 
 To stay under the **1 Million Free Requests** per month, this module is optimized to use **Long Polling (20s)** and **SQS-Managed Encryption**. This combination provides maximum power and security without consuming KMS budget or inflating API request counts.
 
 ---
 
-### �🗺️ Planned Modules
+### 🗺️ Planned Modules
 
 - **S3** - Object storage with lifecycle policies and replication
 - **CloudFront** - Global CDN with WAF integration
@@ -349,11 +381,12 @@ Include:
 - [x] ECR module with image scanning and replication
 - [x] EKS module with managed node groups
 - [x] EFS module with mount targets and lifecycle policies
+- [x] SNS module with filtering and delivery logging
+- [x] Networking (Network Hub) module for foundational infrastructure
 - [ ] S3 module with lifecycle and replication policies
 - [ ] CloudFront distribution with WAF integration
 - [ ] Route53 for DNS and traffic management
 - [ ] Secrets Manager module for credential management
-- [ ] VPC/Networking module for foundational infrastructure
 - [ ] Monitoring module with centralized alerting
 - [ ] Cost optimization configurations and examples
 
