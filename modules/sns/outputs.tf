@@ -171,12 +171,12 @@ output "subscriptions" {
   description = "List of subscription details"
   value = [
     for i, sub in aws_sns_topic_subscription.this : {
-      arn                    = sub.arn
-      protocol               = sub.protocol
-      endpoint               = sub.endpoint
+      arn                            = sub.arn
+      protocol                       = sub.protocol
+      endpoint                       = sub.endpoint
       confirmation_was_authenticated = sub.confirmation_was_authenticated
-      owner_id               = sub.owner_id
-      pending_confirmation   = sub.pending_confirmation
+      owner_id                       = sub.owner_id
+      pending_confirmation           = sub.pending_confirmation
     }
   ]
 }
