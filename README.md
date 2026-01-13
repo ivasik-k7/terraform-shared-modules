@@ -1,5 +1,12 @@
 # AWS Infrastructure Terraform Modules
 
+[![Terraform CI](https://github.com/ivasik-k7/terraform-shared-modules/actions/workflows/ci.yml/badge.svg)](https://github.com/ivasik-k7/terraform-shared-modules/actions)
+[![Security Scan](https://img.shields.io/badge/Security-Checkov-brightgreen)](https://www.checkov.io/)
+[![Cost Control](https://img.shields.io/badge/Costs-Infracost-blueviolet)](https://www.infracost.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Terraform](https://img.shields.io/badge/Terraform-%3E%3D1.5.0-blue)](https://www.terraform.io/)
+[![Support](https://img.shields.io/badge/Support-Crypto-orange)](#donations)
+
 Production-grade, enterprise-ready Terraform modules for deploying AWS infrastructure components. Built with security, scalability, and operational excellence as core principles.
 
 ## Overview
