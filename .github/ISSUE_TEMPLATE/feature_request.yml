@@ -1,0 +1,90 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for the modules
+title: "[FEATURE]: <Short description>"
+labels: ["enhancement", "triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Have a great idea for these modules? 🚀
+        We are always looking to expand our AWS coverage and improve existing functionality.
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Request Type
+      options:
+        - New Module (Add a new AWS service)
+        - Module Enhancement (Add features to existing module)
+        - Documentation Improvement
+        - DX Improvement (Tooling/Scripts)
+    validations:
+      required: true
+
+  - type: input
+    id: module
+    attributes:
+      label: Module Name
+      description: Which module should be created or enhanced?
+      placeholder: "e.g., modules/lambda, modules/vpc"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Is your feature request related to a problem? Please describe.
+      placeholder: "I'm always frustrated when..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like to see.
+      placeholder: "I would like the module to support X by adding variable Y..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Example Usage (HCL)
+      description: Provide a snippet of how you'd like to call the module with this new feature.
+      render: hcl
+      placeholder: |
+        module "example" {
+          source = "../../modules/example"
+          new_feature_enabled = true
+        }
+
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Impact Assessment
+      options:
+        - label: This is a breaking change
+        - label: This feature might increase AWS costs (e.g. enabling AWS Config, GuardDuty)
+        - label: This feature improves security posture
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: A clear and concise description of any alternative solutions or features you've considered.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context or screenshots about the feature request here.
+
+  - type: checkboxes
+    id: visibility
+    attributes:
+      label: Participation
+      options:
+        - label: I am willing to submit a Pull Request for this feature

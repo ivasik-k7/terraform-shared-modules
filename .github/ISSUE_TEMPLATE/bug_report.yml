@@ -1,0 +1,98 @@
+name: Bug Report
+description: File a bug report to help us improve these modules
+title: "[BUG]: <Short description>"
+labels: ["bug", "triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Thanks for taking the time to report a bug! 🐛
+        Before submitting, please ensure you have searched [existing issues](https://github.com/ikovtun/tf-modules/issues) to avoid duplicates.
+
+  - type: input
+    id: module
+    attributes:
+      label: Module Name
+      description: Which specific module is affected?
+      placeholder: "e.g., modules/aurora, modules/eks"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: "What happened? What did you expect to happen?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: How can we recreate this issue?
+      placeholder: |
+        1. Use module version X
+        2. Set variable 'enable_xyz' to true
+        3. Run 'terraform apply'
+        4. Resource fails with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Terraform Configuration
+      description: |
+        Please provide a minimal code snippet to reproduce the issue. 
+        **IMPORTANT: Redact any AWS Keys, account IDs, or private IP addresses.**
+      render: hcl
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terraform Logs / Error Output
+      description: Please paste the relevant parts of the error message.
+      render: shell
+
+  - type: dropdown
+    id: tf-version
+    attributes:
+      label: Terraform Version
+      description: What version of Terraform are you using?
+      options:
+        - ">= 1.6.0"
+        - "1.5.x"
+        - "1.4.x"
+        - "< 1.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: provider-version
+    attributes:
+      label: AWS Provider Version
+      description: Output of `terraform version` (e.g., registry.terraform.io/hashicorp/aws v5.x.x)
+      placeholder: "v5.30.0"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Self-Check Checklist
+      options:
+        - label: I have searched existing issues.
+          required: true
+        - label: I have verified my Terraform configuration is valid with `terraform validate`.
+          required: true
+        - label: I am not sharing any production secrets or sensitive credentials.
+          required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here (e.g., OS, CI/CD environment like GitHub Actions).
