@@ -222,7 +222,7 @@ variable "subscriptions" {
   validation {
     condition = alltrue([
       for sub in var.subscriptions : contains([
-        "sqs", "sms", "email", "email-json", "http", "https", 
+        "sqs", "sms", "email", "email-json", "http", "https",
         "application", "lambda", "firehose"
       ], sub.protocol)
     ])
@@ -231,7 +231,7 @@ variable "subscriptions" {
 
   validation {
     condition = alltrue([
-      for sub in var.subscriptions : 
+      for sub in var.subscriptions :
       sub.filter_policy_scope == null || contains(["MessageAttributes", "MessageBody"], sub.filter_policy_scope)
     ])
     error_message = "Filter policy scope must be either 'MessageAttributes' or 'MessageBody'."
@@ -239,7 +239,7 @@ variable "subscriptions" {
 
   validation {
     condition = alltrue([
-      for sub in var.subscriptions : 
+      for sub in var.subscriptions :
       sub.filter_policy == null || can(jsondecode(sub.filter_policy))
     ])
     error_message = "Filter policy must be valid JSON if provided."
@@ -247,7 +247,7 @@ variable "subscriptions" {
 
   validation {
     condition = alltrue([
-      for sub in var.subscriptions : 
+      for sub in var.subscriptions :
       sub.delivery_policy == null || can(jsondecode(sub.delivery_policy))
     ])
     error_message = "Delivery policy must be valid JSON if provided."
@@ -255,7 +255,7 @@ variable "subscriptions" {
 
   validation {
     condition = alltrue([
-      for sub in var.subscriptions : 
+      for sub in var.subscriptions :
       sub.redrive_policy == null || can(jsondecode(sub.redrive_policy))
     ])
     error_message = "Redrive policy must be valid JSON if provided."
@@ -269,8 +269,8 @@ variable "subscriptions" {
 variable "message_templates" {
   description = "Message templates for different message types"
   type = map(object({
-    subject = string
-    message = string
+    subject         = string
+    message         = string
     default_message = optional(string)
   }))
   default = {}
