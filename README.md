@@ -422,3 +422,46 @@ Regular updates recommended to benefit from:
 **Last Updated:** January 2026  
 **Terraform Version:** 1.3+  
 **AWS Provider Version:** 5.0+
+
+<!-- BEGIN_TF_DOCS -->
+## Requirements
+
+| Name | Version |
+|------|---------|
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.6.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 5.0 |
+
+## Providers
+
+| Name | Version |
+|------|---------|
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 5.100.0 |
+
+## Modules
+
+| Name | Source | Version |
+|------|--------|---------|
+| <a name="module_aurora"></a> [aurora](#module\_aurora) | ./modules/aurora | n/a |
+| <a name="module_ecr"></a> [ecr](#module\_ecr) | ./modules/ecr | n/a |
+| <a name="module_efs"></a> [efs](#module\_efs) | ./modules/efs | n/a |
+| <a name="module_network-hub"></a> [network-hub](#module\_network-hub) | ./modules/network-hub | n/a |
+| <a name="module_sns"></a> [sns](#module\_sns) | ./modules/sns | n/a |
+| <a name="module_sqs"></a> [sqs](#module\_sqs) | ./modules/sqs | n/a |
+
+## Resources
+
+| Name | Type |
+|------|------|
+| [aws_subnets.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnets) | data source |
+| [aws_vpc.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/vpc) | data source |
+
+## Inputs
+
+| Name | Description | Type | Default | Required |
+|------|-------------|------|---------|:--------:|
+| <a name="input_region"></a> [region](#input\_region) | AWS region to deploy resources | `string` | `"us-east-1"` | no |
+
+## Outputs
+
+No outputs.
+<!-- END_TF_DOCS -->
