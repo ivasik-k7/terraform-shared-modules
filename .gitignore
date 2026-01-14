@@ -208,3 +208,4 @@ local-testing/
 # Temporary workspace files
 *.bak
 *.backup
+.terraform.lock.hcl
