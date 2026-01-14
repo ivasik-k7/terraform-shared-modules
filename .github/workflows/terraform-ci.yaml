@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [aurora, ecr, efs, eks, network-hub, route53, sns, sqs]
+        module: [aurora, ecr, efs, eks, network-hub, route53, sns, sqs, tfe-hub]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
