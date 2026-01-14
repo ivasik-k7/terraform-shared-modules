@@ -1,6 +1,6 @@
 # AWS Infrastructure Terraform Modules
 
-[![Terraform CI](https://github.com/ivasik-k7/terraform-shared-modules/actions/workflows/ci.yml/badge.svg)](https://github.com/ivasik-k7/terraform-shared-modules/actions)
+[![Terraform CI](https://github.com/ivasik-k7/terraform-shared-modules/actions/workflows/terraform-ci.yml/badge.svg)](https://github.com/ivasik-k7/terraform-shared-modules/actions)
 [![Security Scan](https://img.shields.io/badge/Security-Checkov-brightgreen)](https://www.checkov.io/)
 [![Cost Control](https://img.shields.io/badge/Costs-Infracost-blueviolet)](https://www.infracost.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
