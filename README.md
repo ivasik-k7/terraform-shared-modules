@@ -1,6 +1,6 @@
 # AWS Infrastructure Terraform Modules
 
-[![Terraform CI](https://github.com/ivasik-k7/terraform-shared-modules/actions/workflows/terraform-ci.yml/badge.svg)](https://github.com/ivasik-k7/terraform-shared-modules/actions)
+[![Terraform Pipeline](https://github.com/ivasik-k7/terraform-shared-modules/actions/workflows/terraform-ci.yaml/badge.svg)](https://github.com/ivasik-k7/terraform-shared-modules/actions/workflows/terraform-ci.yaml)
 [![Security Scan](https://img.shields.io/badge/Security-Checkov-brightgreen)](https://www.checkov.io/)
 [![Cost Control](https://img.shields.io/badge/Costs-Infracost-blueviolet)](https://www.infracost.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -17,39 +17,129 @@ This repository provides a collection of reusable Terraform modules for common A
 
 ### Prerequisites
 
-- **Terraform** `>= 1.3.0`
-- **AWS Provider** `>= 5.0`
-- **AWS Credentials** configured with appropriate permissions
-- **AWS Account** with necessary service limits
+**Required Tools:**
+
+- **Terraform** `>= 1.3.0` - [Download](https://www.terraform.io/downloads)
+- **AWS CLI** `>= 2.0` - [Installation Guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+- **Git** - For cloning and version control
+
+**AWS Requirements:**
+
+- **AWS Account** with appropriate service limits
+- **IAM User/Role** with programmatic access
+- **AWS Provider** `>= 5.0` (auto-installed by Terraform)
+
+### Installation
+
+**1. Install Terraform:**
+
+```bash
+# macOS (Homebrew)
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform
+
+# Linux (Ubuntu/Debian)
+wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+sudo apt update && sudo apt install terraform
+
+# Verify installation
+terraform version
+```
+
+**2. Configure AWS Credentials:**
+
+```bash
+# Option 1: AWS CLI configuration (recommended)
+aws configure
+# Enter: Access Key ID, Secret Access Key, Region, Output format
+
+# Option 2: Environment variables
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_DEFAULT_REGION="us-east-1"
+
+# Option 3: AWS SSO (for organizations)
+aws sso login --profile your-profile
+
+# Verify credentials
+aws sts get-caller-identity
+```
+
+**3. Clone Repository:**
+
+```bash
+git clone https://github.com/ivasik-k7/terraform-shared-modules.git
+cd terraform-shared-modules
+```
 
 ### Basic Usage
 
+**Deploy your first module:**
+
 ```hcl
-module "aurora" {
-  source = "./aurora"
+# main.tf
+terraform {
+  required_version = ">= 1.3.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
+  }
+}
 
-  cluster_identifier = "my-database"
-  engine             = "aurora-postgresql"
-  engine_version     = "15.3"
+provider "aws" {
+  region = "us-east-1"
+}
 
-  vpc_id             = aws_vpc.main.id
-  subnet_ids         = aws_subnet.private[*].id
+module "sqs_queue" {
+  source = "./modules/sqs"
 
-  master_username    = "admin"
-  master_password    = var.db_password  # Use var.sensitive = true
+  queue_name              = "my-app-queue"
+  visibility_timeout      = 30
+  message_retention       = 345600  # 4 days
+  receive_wait_time       = 20      # Long polling
+  enable_dlq              = true
+  max_receive_count       = 3
 
   tags = {
-    Environment = "production"
+    Environment = "dev"
     Project     = "my-app"
   }
 }
 ```
 
-See module-specific READMEs for detailed configuration options and examples.
+**Initialize and deploy:**
+
+```bash
+# Initialize Terraform (download providers)
+terraform init
+
+# Preview changes
+terraform plan
+
+# Apply changes
+terraform apply
+
+# Destroy resources (when done)
+terraform destroy
+```
+
+### Quick Examples
+
+Jump to module-specific examples:
+
+- [Aurora Database](./examples/aurora/basic.tf) - PostgreSQL cluster
+- [SQS Queue](./examples/sqs/basic.tf) - Message queue with DLQ
+- [SNS Topic](./examples/sns/basic.tf) - Pub/sub notifications
+- [Cognito Auth](./examples/cognito/basic.tf) - User authentication
+- [API Gateway](./examples/api-gateway/basic.tf) - HTTP API
+- [All Examples](./examples/) - Complete list
 
 ## Available Modules
 
-### 📊 [Aurora](./aurora)
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-rds.svg" alt="Aurora" height="24"/> [Aurora](./modules/aurora)
 
 Managed relational database with high availability and disaster recovery.
 
@@ -66,7 +156,7 @@ Managed relational database with high availability and disaster recovery.
 
 ---
 
-### 🐳 [ECR](./modules/ecr)
+### <img src="https://symbols.getvecta.com/stencil_9/0_ec2.e39060729d.svg" alt="ECR" height="24"/> [ECR](./modules/ecr)
 
 Elastic Container Registry for managing Docker container images.
 
@@ -82,7 +172,7 @@ Elastic Container Registry for managing Docker container images.
 
 ---
 
-### ☸️ [EKS](./modules/eks)
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-logo.svg" alt="EKS" height="24"/> [EKS](./modules/eks)
 
 Amazon Elastic Kubernetes Service for managed container orchestration.
 
@@ -99,7 +189,7 @@ Amazon Elastic Kubernetes Service for managed container orchestration.
 
 ---
 
-### 📂 [EFS](./modules/efs)
+### <img src="https://symbols.getvecta.com/stencil_24/1_amazon-efs.ef56158125.svg" alt="EFS" height="24"/> [EFS](./modules/efs)
 
 Elastic File System for shared NFS storage across EC2 and containers.
 
@@ -117,7 +207,7 @@ Elastic File System for shared NFS storage across EC2 and containers.
 
 ---
 
-### 📨 [SQS](./modules/sqs)
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-sqs.svg" alt="SQS" height="24"/> [SQS](./modules/sqs)
 
 Simple Queue Service for decoupling microservices and managing distributed message workloads.
 
@@ -135,7 +225,7 @@ Simple Queue Service for decoupling microservices and managing distributed messa
 
 ---
 
-### 📨 [SNS](./modules/sns)
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-sns.svg" alt="SNS" height="24"/> [SNS](./modules/sns)
 
 Simple Notification Service for pub/sub messaging and mobile notifications.
 
@@ -151,7 +241,7 @@ Simple Notification Service for pub/sub messaging and mobile notifications.
 
 ---
 
-### 🌐 [Network Hub](./modules/network-hub)
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-vpc-1.svg" alt="VPC" height="24"/> [Network Hub](./modules/network-hub)
 
 Enterprise-grade VPC module for centralized network infrastructure.
 
@@ -167,6 +257,93 @@ Enterprise-grade VPC module for centralized network infrastructure.
 
 ---
 
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-cognito.svg" alt="Cognito" height="24"/> [Cognito](./modules/cognito)
+
+User authentication and authorization service with User Pools and Identity Pools.
+
+**Key Features:**
+
+- User Pools with MFA (TOTP/SMS) and custom attributes
+- Identity Pools for federated identities and AWS credentials
+- OAuth 2.0 and SAML 2.0 integration
+- Lambda triggers for custom authentication flows
+- User groups with IAM role mapping
+- Advanced security features (risk-based authentication)
+- Custom domains and hosted UI
+
+**Use Case:** User authentication, SSO, mobile/web app identity management
+
+---
+
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-api-gateway.svg" alt="API Gateway" height="24"/> [API Gateway](./modules/api-gateway)
+
+Managed API service supporting REST, HTTP, and WebSocket APIs.
+
+**Key Features:**
+
+- REST API (v1) with full feature set (caching, usage plans, request validation)
+- HTTP API (v2) with 71% cost savings and lower latency
+- WebSocket API for real-time bidirectional communication
+- Multiple authorization types (Cognito, JWT, Lambda, IAM)
+- Custom domains with ACM certificates
+- VPC Link for private integrations
+- Usage plans and API keys for rate limiting
+
+**Use Case:** Serverless APIs, microservices gateway, real-time applications
+
+---
+
+### <img src="https://cloud-icons.onemodel.app/aws/Architecture-Service-Icons_01312023/Arch_Networking-Content-Delivery/64/Arch_AWS-Direct-Connect_64@5x.png" alt="Direct Connect" height="24"/> [Direct Connect](./modules/direct-connect)
+
+Dedicated network connection from on-premises to AWS.
+
+**Key Features:**
+
+- Dedicated connections (1 Gbps, 10 Gbps, 100 Gbps)
+- Link Aggregation Groups (LAG) for redundancy
+- Private, public, and transit virtual interfaces
+- Direct Connect Gateway for multi-region connectivity
+- MACsec encryption support
+- Cross-account gateway associations
+
+**Use Case:** Hybrid cloud connectivity, low-latency workloads, data migration
+
+---
+
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-route53.svg" alt="Route53" height="24"/> [Route53](./modules/route53)
+
+Scalable DNS and domain name management service.
+
+**Key Features:**
+
+- Public and private hosted zones
+- Multiple routing policies (simple, weighted, latency, failover, geolocation)
+- Health checks with CloudWatch alarms
+- DNSSEC for domain security
+- Traffic flow for complex routing
+- Domain registration
+
+**Use Case:** DNS management, traffic routing, health monitoring, multi-region failover
+
+---
+
+### <img src="https://cdn.worldvectorlogo.com/logos/terraform-enterprise.svg" alt="Terraform" height="24"/> [TFE Hub](./modules/tfe-hub)
+
+Terraform Enterprise/Cloud workspace and organization management.
+
+**Key Features:**
+
+- Workspace creation and configuration
+- VCS integration (GitHub, GitLab, Bitbucket)
+- Variable sets and workspace variables
+- Team access management
+- Run triggers and notifications
+- Sentinel policy enforcement
+
+**Use Case:** Terraform Cloud/Enterprise automation, workspace management, CI/CD integration
+
+---
+
 #### Free Tier Tip 💡
 
 To stay under the **1 Million Free Requests** per month, this module is optimized to use **Long Polling (20s)** and **SQS-Managed Encryption**. This combination provides maximum power and security without consuming KMS budget or inflating API request counts.
@@ -177,8 +354,10 @@ To stay under the **1 Million Free Requests** per month, this module is optimize
 
 - **S3** - Object storage with lifecycle policies and replication
 - **CloudFront** - Global CDN with WAF integration
-- **Route53** - DNS and traffic management
-- **Networking** - VPC, subnets, and security infrastructure
+- **Lambda** - Serverless compute with event triggers
+- **DynamoDB** - NoSQL database with global tables
+- **Secrets Manager** - Credential and secret management
+- **WAF** - Web Application Firewall for CloudFront and ALB
 
 ## Architecture Patterns
 
@@ -215,62 +394,6 @@ Each module enforces:
 ✅ **Backup & Recovery** - Automated backups with retention policies  
 ✅ **Versioning** - Explicit provider and resource versioning  
 ✅ **Tagging Strategy** - Consistent tagging across all resources
-
-## Requirements
-
-### Terraform
-
-```hcl
-terraform {
-  required_version = ">= 1.3.0"
-
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
-    }
-  }
-}
-```
-
-### AWS Account Setup
-
-1. Create a dedicated IAM user or role for Terraform
-2. Attach appropriate service permissions (see module docs)
-3. Configure AWS credentials: `aws configure` or environment variables
-4. Ensure account has service quotas for required resources
-
-## Usage
-
-### Initialize Terraform
-
-```bash
-terraform init
-```
-
-### Plan Changes
-
-```bash
-terraform plan -out=tfplan
-```
-
-### Apply Changes
-
-```bash
-terraform apply tfplan
-```
-
-### Environment Separation
-
-Use `.tfvars` files for environment-specific variables:
-
-```bash
-# Development
-terraform apply -var-file="dev.tfvars"
-
-# Production
-terraform apply -var-file="prod.tfvars"
-```
 
 ## Security Considerations
 
@@ -388,11 +511,18 @@ Include:
 - [x] ECR module with image scanning and replication
 - [x] EKS module with managed node groups
 - [x] EFS module with mount targets and lifecycle policies
+- [x] SQS module with FIFO support and DLQ
 - [x] SNS module with filtering and delivery logging
-- [x] Networking (Network Hub) module for foundational infrastructure
+- [x] Network Hub module for foundational infrastructure
+- [x] Cognito module with User Pools and Identity Pools
+- [x] API Gateway module (REST, HTTP, WebSocket)
+- [x] Direct Connect module with LAG and virtual interfaces
+- [x] Route53 module for DNS management
+- [x] TFE Hub module for Terraform Cloud/Enterprise
 - [ ] S3 module with lifecycle and replication policies
 - [ ] CloudFront distribution with WAF integration
-- [ ] Route53 for DNS and traffic management
+- [ ] Lambda module with event sources and layers
+- [ ] DynamoDB module with global tables
 - [ ] Secrets Manager module for credential management
 - [ ] Monitoring module with centralized alerting
 - [ ] Cost optimization configurations and examples
