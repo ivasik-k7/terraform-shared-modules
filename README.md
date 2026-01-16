@@ -133,6 +133,7 @@ Jump to module-specific examples:
 - [Aurora Database](./examples/aurora/basic.tf) - PostgreSQL cluster
 - [SQS Queue](./examples/sqs/basic.tf) - Message queue with DLQ
 - [SNS Topic](./examples/sns/basic.tf) - Pub/sub notifications
+- [ECS Service](./examples/ecs/basic.tf) - Fargate nginx
 - [Cognito Auth](./examples/cognito/basic.tf) - User authentication
 - [API Gateway](./examples/api-gateway/basic.tf) - HTTP API
 - [All Examples](./examples/) - Complete list
@@ -169,6 +170,24 @@ Elastic Container Registry for managing Docker container images.
 - Registry pull-through cache
 
 **Use Case:** Container image storage and distribution for EKS, ECS workloads
+
+---
+
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-ecs.svg" alt="ECS" height="24"/> [ECS](./modules/ecs)
+
+Elastic Container Service for running containerized applications with Fargate or EC2.
+
+**Key Features:**
+
+- Multiple launch types (Fargate, Fargate Spot, EC2)
+- Auto-scaling with target tracking and step scaling
+- Service discovery with AWS Cloud Map
+- Load balancer integration (ALB/NLB)
+- EFS volume support for persistent storage
+- Container Insights for monitoring
+- ECS Exec for interactive debugging
+
+**Use Case:** Containerized applications, microservices, batch processing, web applications
 
 ---
 
@@ -509,6 +528,7 @@ Include:
 
 - [x] Aurora DB module with full HA and monitoring
 - [x] ECR module with image scanning and replication
+- [x] ECS module with Fargate and EC2 launch types
 - [x] EKS module with managed node groups
 - [x] EFS module with mount targets and lifecycle policies
 - [x] SQS module with FIFO support and DLQ
