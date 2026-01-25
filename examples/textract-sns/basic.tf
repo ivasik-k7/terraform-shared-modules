@@ -116,6 +116,31 @@ resource "aws_s3_bucket" "input" {
   )
 }
 
+resource "aws_s3_bucket_policy" "textract_access" {
+  bucket = aws_s3_bucket.input.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowTextractRead"
+        Effect = "Allow"
+        Principal = {
+          AWS = module.textract.textract_role_arn
+        }
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.input.arn,
+          "${aws_s3_bucket.input.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_s3_bucket" "output" {
   bucket = "${local.name_prefix}-output-${data.aws_caller_identity.current.account_id}"
 
@@ -183,11 +208,220 @@ resource "aws_s3_bucket_public_access_block" "output" {
 }
 
 # ============================================================================
+# Lambda Function - Auto-trigger Textract Jobs
+# ============================================================================
+
+data "archive_file" "lambda_trigger" {
+  type        = "zip"
+  output_path = "${path.module}/lambda_trigger.zip"
+
+  source {
+    content  = <<-EOF
+import json
+import boto3
+import os
+import datetime
+from urllib.parse import unquote_plus
+
+textract = boto3.client('textract')
+
+def handler(event, context):
+    print(f"Received event: {json.dumps(event)}")
+    
+    role_arn = os.environ['TEXTRACT_ROLE_ARN']
+    sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+    output_bucket = os.environ['OUTPUT_BUCKET']
+    
+    for record in event['Records']:
+        bucket = record['s3']['bucket']['name']
+        key = unquote_plus(record['s3']['object']['key'])
+        
+        print(f"Processing: s3://{bucket}/{key}")
+        
+        try:
+            # Start Textract Job
+            response = textract.start_document_text_detection(
+                DocumentLocation={
+                    'S3Object': {'Bucket': bucket, 'Name': key}
+                },
+                NotificationChannel={
+                    'SNSTopicArn': sns_topic_arn,
+                    'RoleArn': role_arn
+                },
+                JobTag=f"auto-{key.split('/')[-1]}"
+            )
+            
+            job_id = response['JobId']
+            print(f"Started Textract job: {job_id}")
+            
+            # Metadata
+            metadata = {
+                'JobId': job_id,
+                'SourceBucket': bucket,
+                'SourceKey': key,
+                'LambdaRequestId': context.aws_request_id,  # FIX 1: Correct Attribute
+                'StartedAt': datetime.datetime.utcnow().isoformat(), # FIX 2: Correct Timestamp
+                'Status': 'IN_PROGRESS'
+            }
+            
+            s3 = boto3.client('s3')
+            s3.put_object(
+                Bucket=output_bucket,
+                Key=f"jobs/{job_id}/metadata.json",
+                Body=json.dumps(metadata, indent=2),
+                ContentType='application/json'
+            )
+            
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            raise
+    
+    return {'statusCode': 200, 'body': 'Done'}
+EOF
+    filename = "index.py"
+  }
+}
+
+
+resource "aws_iam_role" "lambda_trigger" {
+  name = "${local.name_prefix}-lambda-trigger-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = merge(
+    local.base_tags,
+    {
+      Name = "${local.name_prefix}-lambda-trigger-role"
+    }
+  )
+}
+
+resource "aws_iam_role_policy" "lambda_trigger" {
+  name = "${local.name_prefix}-lambda-trigger-policy"
+  role = aws_iam_role.lambda_trigger.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "textract:StartDocumentTextDetection",
+          "textract:StartDocumentAnalysis",
+          "textract:GetDocumentTextDetection"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.input.arn,
+          "${aws_s3_bucket.input.arn}/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject"
+        ]
+        Resource = "${aws_s3_bucket.output.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = module.textract.textract_role_arn
+        Condition = {
+          StringLike = {
+            "iam:PassedToService" : "textract.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_trigger_basic" {
+  role       = aws_iam_role.lambda_trigger.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_lambda_function" "textract_trigger" {
+  filename         = data.archive_file.lambda_trigger.output_path
+  function_name    = "${local.name_prefix}-textract-trigger"
+  role             = aws_iam_role.lambda_trigger.arn
+  handler          = "index.handler"
+  source_code_hash = data.archive_file.lambda_trigger.output_base64sha256
+  runtime          = "python3.11"
+  timeout          = 60
+  memory_size      = 256
+
+  environment {
+    variables = {
+      TEXTRACT_ROLE_ARN = module.textract.textract_role_arn
+      SNS_TOPIC_ARN     = module.textract.sns_topic_completion_arn
+      OUTPUT_BUCKET     = aws_s3_bucket.output.id
+    }
+  }
+
+  tags = merge(
+    local.base_tags,
+    {
+      Name    = "${local.name_prefix}-textract-trigger"
+      Purpose = "auto-start-textract-jobs"
+    }
+  )
+
+  depends_on = [
+    aws_iam_role_policy.lambda_trigger,
+    aws_iam_role_policy_attachment.lambda_trigger_basic
+  ]
+}
+
+resource "aws_s3_bucket_notification" "textract_trigger" {
+  bucket = aws_s3_bucket.input.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.textract_trigger.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = ""
+    filter_suffix       = ""
+  }
+
+  depends_on = [aws_lambda_permission.allow_s3]
+}
+
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id  = "AllowS3Invoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.textract_trigger.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.input.arn
+}
+
+# ============================================================================
 # Textract Module
 # ============================================================================
 
 module "textract" {
-  source = "../../modules/textract"
+  source = "../../modules/textract-sns"
 
   project_name = local.project_name
   environment  = local.environment
@@ -202,13 +436,15 @@ module "textract" {
 
   enable_async_processing = true
 
-  enable_sns_encryption = false # Saves KMS API calls
+  enable_sns_encryption = false
   kms_key_arn           = null
   s3_kms_key_arn        = null
 
   external_id = "textract-dev"
 
-  notification_email_endpoints  = [] # Email costs after 1,000/month
+  notification_email_endpoints = [
+    "kovtun.ivan@proton.me",
+  ]                                  # Email costs after 1,000/month
   notification_sqs_endpoints    = [] # SQS is always free (1M requests)
   notification_lambda_endpoints = [] # Lambda is free (1M requests)
 
@@ -238,10 +474,6 @@ module "textract" {
 
   enable_cross_account_access = false
   trusted_account_ids         = []
-
-  compliance_level = "standard"
-
-  module_version = "1.0.0"
 
   tags = local.base_tags
 }
@@ -275,6 +507,16 @@ output "output_bucket_name" {
   value       = aws_s3_bucket.output.id
 }
 
+output "lambda_function_arn" {
+  description = "ARN of the Lambda function that triggers Textract jobs"
+  value       = aws_lambda_function.textract_trigger.arn
+}
+
+output "lambda_function_name" {
+  description = "Name of the Lambda function that triggers Textract jobs"
+  value       = aws_lambda_function.textract_trigger.function_name
+}
+
 output "deployment_summary" {
   description = "Summary of the deployment configuration"
   value = {
@@ -285,5 +527,37 @@ output "deployment_summary" {
     storage_lifecycle      = "30d Standard -> 90d Glacier -> 365d Delete"
     monitoring_level       = "Basic (CloudWatch Logs only)"
     encryption_level       = "AWS Managed (no KMS costs)"
+    auto_trigger_enabled   = true
+    upload_prefix          = "documents/"
   }
+}
+
+
+
+output "usage_instructions" {
+  description = "Instructions for using the auto-trigger feature"
+  value       = <<-EOT
+  
+  🚀 AUTO-TRIGGER SETUP COMPLETE!
+  
+  To process documents automatically:
+  
+  1. Upload a PDF to the input bucket with 'documents/' prefix:
+     aws s3 cp your-file.pdf s3://${aws_s3_bucket.input.id}/documents/your-file.pdf
+  
+  2. Lambda will automatically:
+     - Detect the upload
+     - Start a Textract job
+     - Send you an email when complete
+  
+  3. Check job metadata:
+     aws s3 ls s3://${aws_s3_bucket.output.id}/jobs/
+  
+  4. View Lambda logs:
+     aws logs tail /aws/lambda/${aws_lambda_function.textract_trigger.function_name} --follow
+  
+  Supported file types: PDF, PNG, JPG, JPEG, TIFF
+  Max file size: 500MB
+  
+  EOT
 }

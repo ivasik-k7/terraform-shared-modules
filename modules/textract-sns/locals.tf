@@ -26,7 +26,6 @@ locals {
   input_bucket_name  = split(":", var.input_bucket_arn)[5]
   output_bucket_name = var.output_bucket_arn != null ? split(":", var.output_bucket_arn)[5] : null
 
-  # Format: {project}-{env}-{region}-{account_suffix}
   name_prefix = "${var.project_name}-${var.environment}-${local.region_code}-${local.account_id_short}"
 
   name_prefix_short = "${var.project_name}-${var.environment}-${local.region_code}"

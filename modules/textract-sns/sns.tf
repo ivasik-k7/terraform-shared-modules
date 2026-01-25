@@ -40,6 +40,7 @@ resource "aws_sns_topic" "textract_failure" {
   )
 }
 
+
 # ============================================================================
 # Dead Letter Queue for SNS
 # ============================================================================
@@ -160,7 +161,7 @@ resource "aws_sns_topic_subscription" "lambda_failure" {
 # SNS Topic Policies
 # ============================================================================
 
-data "aws_iam_policy_document" "sns_topic_policy" {
+data "aws_iam_policy_document" "sns_topic_policy_completion" {
   count = var.enable_async_processing ? 1 : 0
 
   statement {
@@ -177,7 +178,57 @@ data "aws_iam_policy_document" "sns_topic_policy" {
     ]
 
     resources = [
-      aws_sns_topic.textract_completion[0].arn,
+      aws_sns_topic.textract_completion[0].arn
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(var.sns_subscriber_principals) > 0 ? [1] : []
+
+    content {
+      sid    = "AllowSubscription"
+      effect = "Allow"
+
+      principals {
+        type        = "AWS"
+        identifiers = var.sns_subscriber_principals
+      }
+
+      actions = [
+        "SNS:Subscribe",
+        "SNS:Receive"
+      ]
+
+      resources = [
+        aws_sns_topic.textract_completion[0].arn
+      ]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "sns_topic_policy_failure" {
+  count = var.enable_async_processing ? 1 : 0
+
+  statement {
+    sid    = "AllowTextractPublish"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["textract.amazonaws.com"]
+    }
+
+    actions = [
+      "SNS:Publish"
+    ]
+
+    resources = [
       aws_sns_topic.textract_failure[0].arn
     ]
 
@@ -206,7 +257,6 @@ data "aws_iam_policy_document" "sns_topic_policy" {
       ]
 
       resources = [
-        aws_sns_topic.textract_completion[0].arn,
         aws_sns_topic.textract_failure[0].arn
       ]
     }
@@ -217,12 +267,12 @@ resource "aws_sns_topic_policy" "textract_completion" {
   count = var.enable_async_processing ? 1 : 0
 
   arn    = aws_sns_topic.textract_completion[0].arn
-  policy = data.aws_iam_policy_document.sns_topic_policy[0].json
+  policy = data.aws_iam_policy_document.sns_topic_policy_completion[0].json
 }
 
 resource "aws_sns_topic_policy" "textract_failure" {
   count = var.enable_async_processing ? 1 : 0
 
   arn    = aws_sns_topic.textract_failure[0].arn
-  policy = data.aws_iam_policy_document.sns_topic_policy[0].json
+  policy = data.aws_iam_policy_document.sns_topic_policy_failure[0].json
 }
