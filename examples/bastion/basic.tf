@@ -41,84 +41,6 @@ locals {
   }
 }
 
-resource "aws_vpc_endpoint" "s3" {
-  vpc_id            = data.aws_vpc.default.id
-  service_name      = "com.amazonaws.us-east-1.s3"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids   = data.aws_route_tables.default.ids
-
-  tags = merge(local.base_tags, { Name = "${local.name_prefix}-s3-endpoint" })
-}
-
-resource "aws_s3_bucket" "test" {
-  bucket        = "${local.name_prefix}-bastion-test-${random_id.suffix.hex}"
-  force_destroy = true
-  tags          = local.base_tags
-}
-
-resource "random_id" "suffix" {
-  byte_length = 4
-}
-
-# Block all public access
-resource "aws_s3_bucket_public_access_block" "test" {
-  bucket = aws_s3_bucket.test.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# Bucket policy — only allow access from the VPC endpoint
-resource "aws_s3_bucket_policy" "test" {
-  bucket = aws_s3_bucket.test.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "AccessFromVPCEndpointOnly"
-        Effect    = "Deny"
-        Principal = "*"
-        Action    = "s3:*"
-        Resource = [
-          aws_s3_bucket.test.arn,
-          "${aws_s3_bucket.test.arn}/*"
-        ]
-        Condition = {
-          StringNotEquals = {
-            "aws:SourceVpce" = aws_vpc_endpoint.s3.id
-          }
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_policy" "bastion_s3" {
-  name = "${local.name_prefix}-bastion-s3"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          aws_s3_bucket.test.arn,
-          "${aws_s3_bucket.test.arn}/*"
-        ]
-      }
-    ]
-  })
-}
-
 module "bastion" {
   source = "../../modules/bastion"
 
@@ -165,8 +87,6 @@ module "bastion" {
   ssh_hardening_enabled        = true
   metadata_http_tokens         = "required" # enforce IMDSv2
   asg_instance_refresh_enabled = false      # avoids accidental replacement
-
-  iam_extra_policy_arns = [aws_iam_policy.bastion_s3.arn]
 
   tags = local.base_tags
 }
