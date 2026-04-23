@@ -1,712 +1,320 @@
-# Network Hub Module
+# network-hub
 
-Enterprise-grade VPC module for creating centralized network infrastructure with connectivity options. This module serves as the foundation for hub-and-spoke network architectures, providing secure, scalable, and highly available networking infrastructure.
+Terraform module for AWS VPC networking. Creates or adopts a VPC, lays out
+subnets across availability zones, wires the usual gateways and route tables,
+and exposes a consistent set of outputs that downstream modules can key off.
 
-## Overview
+Designed for hub-and-spoke topologies and on-prem-to-AWS migrations where a
+Transit Gateway or Cloud WAN sits in the middle.
 
-The Network Hub module is designed to create and manage complex VPC infrastructures that serve as central connectivity points in enterprise AWS environments. It supports both greenfield deployments (new VPC creation) and brownfield scenarios (existing VPC integration), making it ideal for organizations at any stage of their cloud journey.
+## What you get
 
-### Key Capabilities
+- New VPC or adoption of an existing one (`create_vpc` vs `vpc_id`).
+- Five subnet tiers, each optional: `public`, `private`, `database`, `intra`,
+  `transit`.
+- NAT gateways (one per AZ, one shared, or none).
+- Internet gateway, with the public route table pointed at it.
+- Per-tier route tables and associations.
+- VPC endpoints (interface and gateway).
+- Custom security groups and optional management of the VPC default SG/NACL.
+- VPC flow logs (caller supplies the destination).
+- Route 53 Resolver endpoints for hybrid DNS.
+- VPC peering connections with per-route-table propagation.
+- Transit Gateway VPC attachment with TGW-side routes.
 
-- **🏗️ Flexible VPC Management** - Create new VPC or integrate with existing infrastructure
-- **🌐 Multi-AZ Subnets** - Public, private, database, and intra subnets across availability zones
-- **🚪 NAT Gateway Support** - Single or per-AZ NAT gateways with automatic EIP management
-- **🔍 DNS Resolver Endpoints** - Inbound/outbound DNS resolution for hybrid cloud connectivity
-- **🔗 VPC Endpoints** - Interface and gateway endpoints for secure AWS service access
-- **🤝 VPC Peering** - Cross-VPC connectivity with automated route management
-- **🛡️ Security Groups** - Custom and default security group management with validation
-- **📊 Flow Logs** - VPC traffic monitoring and logging
-- **⚙️ DHCP Options** - Custom DNS and NTP server configuration for enterprise requirements
+## Subnet tiers
 
-## Architecture Patterns
+| Tier | Default route | Typical residents |
+|---|---|---|
+| `public` | IGW | ALBs, NAT gateways, bastions |
+| `private` | NAT | Workloads (EKS nodes, EC2, ECS tasks) |
+| `database` | none | RDS, ElastiCache, MemoryDB |
+| `intra` | none | VPC endpoint ENIs, internal LBs, EKS control-plane ENIs |
+| `transit` | none | TGW / Cloud WAN attachment ENIs |
 
-### Hub-and-Spoke Network
+Each tier is enabled by providing one CIDR per AZ. Passing an empty list
+disables the tier.
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Spoke VPC A   │────│   Network Hub   │────│   Spoke VPC B   │
-│  (Workloads)    │    │  (Shared Svcs)  │    │  (Workloads)    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                              │
-                       ┌─────────────────┐
-                       │   On-Premises   │
-                       │   (via DX/VPN)  │
-                       └─────────────────┘
-```
+### Why `transit` subnets matter for hybrid
 
-### Multi-Tier Application Architecture
+When you attach a VPC to a Transit Gateway (or Cloud WAN), AWS places ENIs
+in the subnets you nominate. AWS' recommendation (and common production
+practice) is to keep those ENIs in a dedicated tier:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        VPC (10.0.0.0/16)                   │
-├─────────────────────────────────────────────────────────────┤
-│ Public Subnets (10.0.1-3.0/24)                             │
-│ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐             │
-│ │     ALB     │ │   NAT GW    │ │   Bastion   │             │
-│ └─────────────┘ └─────────────┘ └─────────────┘             │
-├─────────────────────────────────────────────────────────────┤
-│ Private Subnets (10.0.11-13.0/24)                          │
-│ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐             │
-│ │   App Tier  │ │   App Tier  │ │   App Tier  │             │
-│ └─────────────┘ └─────────────┘ └─────────────┘             │
-├─────────────────────────────────────────────────────────────┤
-│ Database Subnets (10.0.21-23.0/24)                         │
-│ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐             │
-│ │     RDS     │ │     RDS     │ │   ElastiC   │             │
-│ │   Primary   │ │   Standby   │ │    Cache    │             │
-│ └─────────────┘ └─────────────┘ └─────────────┘             │
-└─────────────────────────────────────────────────────────────┘
-```
+- Keeps on-prem routing decisions off workload route tables.
+- Lets you scope NACLs / SGs tightly to TGW traffic patterns.
+- A `/28` per AZ is enough; AWS reserves 5 addresses and the attachment uses
+  one ENI per AZ.
 
-## Usage Examples
+When `transit_subnets` is populated, the module wires the TGW attachment into
+them automatically. If left empty, it falls back to private subnets so
+simple deployments still work.
 
-### 1. Production-Ready Multi-AZ VPC
+## Quick start
 
 ```hcl
-module "production_network" {
-  source = "./modules/network-hub"
+module "hub" {
+  source = "git::https://github.com/your-org/tf-modules.git//modules/network-hub"
 
-  name        = "prod-network"
+  name       = "hub-prod"
+  create_vpc = true
+
   environment = "prod"
-
-  # VPC Configuration
-  vpc_cidr_block = "10.0.0.0/16"
-  secondary_cidr_blocks = ["10.1.0.0/16"]  # Additional IP space
-
-  # Multi-AZ deployment across 3 zones
-  availability_zones = ["us-west-2a", "us-west-2b", "us-west-2c"]
-
-  # Subnet configuration
-  public_subnet_cidrs   = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  private_subnet_cidrs  = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
-  database_subnet_cidrs = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
-  intra_subnet_cidrs    = ["10.0.31.0/24", "10.0.32.0/24", "10.0.33.0/24"]
-
-  # High availability NAT configuration
-  create_internet_gateway = true
-  enable_nat_gateway      = true
-  single_nat_gateway      = false  # One NAT per AZ for HA
-  one_nat_gateway_per_az  = true
-
-  # DNS configuration
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  # Monitoring and logging
-  enable_flow_logs = true
-  flow_log_destination_type = "cloud-watch-logs"
-  flow_log_traffic_type     = "ALL"
-
   tags = {
-    Project     = "enterprise-app"
-    CostCenter  = "engineering"
-    Compliance  = "sox"
+    Project    = "platform"
+    Team       = "network"
+    CostCenter = "NET-001"
   }
+
+  vpc_cidr_block     = "10.0.0.0/16"
+  availability_zones = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+
+  public_subnets   = ["10.0.0.0/24",  "10.0.1.0/24",  "10.0.2.0/24"]
+  private_subnets  = ["10.0.16.0/20", "10.0.32.0/20", "10.0.48.0/20"]
+  database_subnets = ["10.0.64.0/24", "10.0.65.0/24", "10.0.66.0/24"]
+  intra_subnets    = ["10.0.80.0/24", "10.0.81.0/24", "10.0.82.0/24"]
+  transit_subnets  = ["10.0.96.0/28", "10.0.96.16/28", "10.0.96.32/28"]
+
+  enable_nat_gateway     = true
+  one_nat_gateway_per_az = true
+
+  enable_flow_logs          = true
+  flow_log_destination_arn  = aws_s3_bucket.flow_logs.arn
+  flow_log_destination_type = "s3"
 }
 ```
 
-### 2. Hybrid Cloud with DNS Resolution
+## Hybrid connectivity (TGW / Cloud WAN)
 
 ```hcl
-module "hybrid_network" {
-  source = "./modules/network-hub"
+module "hub" {
+  source = "git::https://github.com/your-org/tf-modules.git//modules/network-hub"
 
-  name        = "hybrid-hub"
-  environment = "prod"
+  name       = "hub-prod"
+  create_vpc = true
 
-  vpc_cidr_block = "10.100.0.0/16"
-  availability_zones = ["us-east-1a", "us-east-1b"]
+  vpc_cidr_block     = "10.0.0.0/16"
+  availability_zones = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
 
-  private_subnet_cidrs = ["10.100.1.0/24", "10.100.2.0/24"]
+  private_subnets = ["10.0.16.0/20", "10.0.32.0/20", "10.0.48.0/20"]
+  intra_subnets   = ["10.0.80.0/24", "10.0.81.0/24", "10.0.82.0/24"]
+  transit_subnets = ["10.0.96.0/28", "10.0.96.16/28", "10.0.96.32/28"]
 
-  # DNS resolver endpoints for hybrid connectivity
-  enable_dns_resolver_endpoints = true
-  dns_resolver_subnet_ids = [
-    "subnet-12345678",  # Private subnet in AZ-a
-    "subnet-87654321"   # Private subnet in AZ-b
+  transit_gateway_id = "tgw-0123456789abcdef0"
+
+  # Route the on-prem corp CIDR from private + intra RTs toward the TGW.
+  # The module expands this across every listed route table.
+  transit_gateway_routes = [
+    {
+      destination_cidr_block = "172.16.0.0/12"
+      route_table_ids        = concat(
+        module.hub.private_route_table_ids,
+        [module.hub.intra_route_table_id],
+      )
+    },
   ]
-
-  # Custom security group for DNS resolver
-  security_groups = {
-    dns-resolver = {
-      description = "DNS resolver endpoint security group"
-      ingress_rules = [
-        {
-          description = "DNS from on-premises"
-          from_port   = 53
-          to_port     = 53
-          protocol    = "tcp"
-          cidr_blocks = ["192.168.0.0/16"]  # On-premises CIDR
-        },
-        {
-          description = "DNS UDP from on-premises"
-          from_port   = 53
-          to_port     = 53
-          protocol    = "udp"
-          cidr_blocks = ["192.168.0.0/16"]
-        }
-      ]
-      egress_rules = [
-        {
-          description = "All outbound"
-          from_port   = 0
-          to_port     = 0
-          protocol    = "-1"
-          cidr_blocks = ["0.0.0.0/0"]
-        }
-      ]
-      tags = { Purpose = "hybrid-dns" }
-    }
-  }
-
-  # DHCP options for custom DNS
-  enable_dhcp_options = true
-  dhcp_options_domain_name = "corp.example.com"
-  dhcp_options_domain_name_servers = ["10.100.1.10", "10.100.2.10"]
 }
 ```
 
-### 3. Service-Optimized VPC with Endpoints
+## Adopting an existing VPC
 
 ```hcl
-module "service_network" {
-  source = "./modules/network-hub"
+module "hub" {
+  source = "git::https://github.com/your-org/tf-modules.git//modules/network-hub"
 
-  name        = "services-vpc"
-  environment = "prod"
+  name   = "hub-existing"
+  vpc_id = "vpc-0abc123def456789"
 
-  vpc_cidr_block = "10.200.0.0/16"
-  private_subnet_cidrs = ["10.200.1.0/24", "10.200.2.0/24"]
+  public_subnet_ids   = ["subnet-a1", "subnet-a2", "subnet-a3"]
+  private_subnet_ids  = ["subnet-b1", "subnet-b2", "subnet-b3"]
+  database_subnet_ids = ["subnet-c1", "subnet-c2", "subnet-c3"]
 
-  # VPC Endpoints for AWS services (no internet required)
-  vpc_endpoints = {
-    s3 = {
-      service_name        = "com.amazonaws.us-west-2.s3"
-      vpc_endpoint_type   = "Interface"
-      subnet_ids          = ["subnet-private1", "subnet-private2"]
-      security_group_ids  = ["sg-vpc-endpoints"]
-      private_dns_enabled = true
-      policy              = null
-      tags                = { Service = "s3" }
-    }
-
-    ec2 = {
-      service_name        = "com.amazonaws.us-west-2.ec2"
-      vpc_endpoint_type   = "Interface"
-      subnet_ids          = ["subnet-private1", "subnet-private2"]
-      security_group_ids  = ["sg-vpc-endpoints"]
-      private_dns_enabled = true
-      policy              = null
-      tags                = { Service = "ec2" }
-    }
-
-    ssm = {
-      service_name        = "com.amazonaws.us-west-2.ssm"
-      vpc_endpoint_type   = "Interface"
-      subnet_ids          = ["subnet-private1", "subnet-private2"]
-      security_group_ids  = ["sg-vpc-endpoints"]
-      private_dns_enabled = true
-      policy              = null
-      tags                = { Service = "ssm" }
-    }
-  }
-
-  # Gateway endpoints (no additional charges)
-  gateway_vpc_endpoints = {
-    s3 = {
-      service_name    = "com.amazonaws.us-west-2.s3"
-      route_table_ids = ["rt-private"]
-      policy          = null
-      tags            = { Type = "gateway" }
-    }
-
-    dynamodb = {
-      service_name    = "com.amazonaws.us-west-2.dynamodb"
-      route_table_ids = ["rt-private"]
-      policy          = null
-      tags            = { Type = "gateway" }
-    }
-  }
+  # No IGW / NAT creation; the module won't try to create route tables for
+  # tiers you didn't pass subnet IDs for.
+  create_internet_gateway     = false
+  enable_nat_gateway          = false
+  create_public_route_table   = false
+  create_private_route_tables = false
 }
 ```
 
-### 4. Multi-VPC Peering Hub
-
-```hcl
-module "peering_hub" {
-  source = "./modules/network-hub"
-
-  name        = "peering-hub"
-  environment = "prod"
-
-  vpc_cidr_block = "10.0.0.0/16"
-  private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
-
-  # VPC Peering connections
-  vpc_peerings = {
-    spoke-a = {
-      peer_vpc_id      = "vpc-spoke-a-12345"
-      peer_vpc_cidr    = "10.1.0.0/16"
-      peer_owner_id    = "123456789012"
-      peer_region      = "us-west-2"
-      auto_accept      = true
-      route_table_ids  = ["rt-private-hub"]
-      tags = {
-        Purpose = "spoke-a-connectivity"
-      }
-    }
-
-    spoke-b = {
-      peer_vpc_id      = "vpc-spoke-b-67890"
-      peer_vpc_cidr    = "10.2.0.0/16"
-      peer_owner_id    = "123456789012"
-      peer_region      = "us-west-2"
-      auto_accept      = true
-      route_table_ids  = ["rt-private-hub"]
-      tags = {
-        Purpose = "spoke-b-connectivity"
-      }
-    }
-  }
-}
-```
-
-### 5. Existing VPC Integration
-
-```hcl
-module "existing_vpc_enhancement" {
-  source = "./modules/network-hub"
-
-  name        = "enhanced-existing"
-  environment = "prod"
-
-  # Use existing VPC
-  create_vpc = false
-  vpc_id     = "vpc-existing-12345"
-
-  # Work with existing subnets
-  public_subnet_ids  = ["subnet-pub-1", "subnet-pub-2"]
-  private_subnet_ids = ["subnet-prv-1", "subnet-prv-2"]
-
-  # Add route table management
-  create_public_route_table   = true
-  create_private_route_tables = true
-
-  # Add NAT Gateway to existing public subnets
-  enable_nat_gateway = true
-  single_nat_gateway = true
-
-  # Enhance with VPC endpoints
-  vpc_endpoints = {
-    s3 = {
-      service_name        = "com.amazonaws.us-west-2.s3"
-      vpc_endpoint_type   = "Interface"
-      subnet_ids          = ["subnet-prv-1", "subnet-prv-2"]
-      security_group_ids  = ["sg-existing-endpoints"]
-      private_dns_enabled = true
-      policy              = null
-      tags                = { Enhancement = "true" }
-    }
-  }
-}
-```
-
-## Advanced Configuration
-
-### Custom Security Groups
-
-```hcl
-security_groups = {
-  web-tier = {
-    description = "Web tier security group"
-    ingress_rules = [
-      {
-        description = "HTTP from ALB"
-        from_port   = 80
-        to_port     = 80
-        protocol    = "tcp"
-        security_groups = ["sg-alb-12345"]
-      },
-      {
-        description = "HTTPS from ALB"
-        from_port   = 443
-        to_port     = 443
-        protocol    = "tcp"
-        security_groups = ["sg-alb-12345"]
-      }
-    ]
-    egress_rules = [
-      {
-        description = "Database access"
-        from_port   = 5432
-        to_port     = 5432
-        protocol    = "tcp"
-        security_groups = ["sg-database-12345"]
-      }
-    ]
-    tags = { Tier = "web" }
-  }
-
-  database = {
-    description = "Database tier security group"
-    ingress_rules = [
-      {
-        description = "PostgreSQL from app tier"
-        from_port   = 5432
-        to_port     = 5432
-        protocol    = "tcp"
-        security_groups = ["sg-app-tier"]
-      }
-    ]
-    egress_rules = []
-    tags = { Tier = "database" }
-  }
-}
-```
-
-### Flow Logs Configuration
-
-```hcl
-# CloudWatch Logs
-enable_flow_logs = true
-flow_log_destination_type = "cloud-watch-logs"
-flow_log_destination_arn = "arn:aws:logs:us-west-2:123456789012:log-group:vpc-flow-logs"
-flow_log_iam_role_arn = "arn:aws:iam::123456789012:role/flowlogsRole"
-flow_log_traffic_type = "ALL"
-flow_log_log_format = "$${version} $${account-id} $${interface-id} $${srcaddr} $${dstaddr} $${srcport} $${dstport} $${protocol} $${packets} $${bytes} $${windowstart} $${windowend} $${action} $${flowlogstatus}"
-
-# S3 Destination
-enable_flow_logs = true
-flow_log_destination_type = "s3"
-flow_log_destination_arn = "arn:aws:s3:::my-vpc-flow-logs-bucket/flow-logs/"
-flow_log_traffic_type = "REJECT"  # Only log rejected traffic
-```
-
-## Complete Input Reference
-
-### Core Configuration
-
-| Name          | Description                                          | Type          | Default | Required |
-| ------------- | ---------------------------------------------------- | ------------- | ------- | :------: |
-| `name`        | Name prefix for all resources                        | `string`      | n/a     |   yes    |
-| `environment` | Environment name (dev, staging, prod, test, sandbox) | `string`      | `"dev"` |    no    |
-| `tags`        | Map of tags to apply to all resources                | `map(string)` | `{}`    |    no    |
-
-### VPC Configuration
-
-| Name                                   | Description                                         | Type           | Default     |  Required   |
-| -------------------------------------- | --------------------------------------------------- | -------------- | ----------- | :---------: |
-| `create_vpc`                           | Whether to create a new VPC                         | `bool`         | `true`      |     no      |
-| `vpc_id`                               | ID of existing VPC to use (when create_vpc = false) | `string`       | `null`      |     no      |
-| `vpc_cidr_block`                       | CIDR block for VPC                                  | `string`       | `null`      | conditional |
-| `secondary_cidr_blocks`                | List of secondary CIDR blocks                       | `list(string)` | `[]`        |     no      |
-| `instance_tenancy`                     | Tenancy option for instances (default, dedicated)   | `string`       | `"default"` |     no      |
-| `enable_dns_support`                   | Enable DNS support in VPC                           | `bool`         | `true`      |     no      |
-| `enable_dns_hostnames`                 | Enable DNS hostnames in VPC                         | `bool`         | `true`      |     no      |
-| `enable_ipv6`                          | Enable IPv6 CIDR block                              | `bool`         | `false`     |     no      |
-| `enable_network_address_usage_metrics` | Enable network address usage metrics                | `bool`         | `false`     |     no      |
-
-### Subnet Configuration
-
-| Name                      | Description                                        | Type           | Default | Required |
-| ------------------------- | -------------------------------------------------- | -------------- | ------- | :------: |
-| `create_subnets`          | Whether to create subnets (when create_vpc = true) | `bool`         | `true`  |    no    |
-| `availability_zones`      | List of availability zones                         | `list(string)` | `[]`    |    no    |
-| `public_subnet_cidrs`     | CIDR blocks for public subnets                     | `list(string)` | `[]`    |    no    |
-| `private_subnet_cidrs`    | CIDR blocks for private subnets                    | `list(string)` | `[]`    |    no    |
-| `database_subnet_cidrs`   | CIDR blocks for database subnets                   | `list(string)` | `[]`    |    no    |
-| `intra_subnet_cidrs`      | CIDR blocks for intra subnets                      | `list(string)` | `[]`    |    no    |
-| `public_subnet_ids`       | IDs of existing public subnets                     | `list(string)` | `[]`    |    no    |
-| `private_subnet_ids`      | IDs of existing private subnets                    | `list(string)` | `[]`    |    no    |
-| `database_subnet_ids`     | IDs of existing database subnets                   | `list(string)` | `[]`    |    no    |
-| `map_public_ip_on_launch` | Auto-assign public IP in public subnets            | `bool`         | `true`  |    no    |
-
-### Internet Gateway & NAT
-
-| Name                                 | Description                        | Type           | Default       | Required |
-| ------------------------------------ | ---------------------------------- | -------------- | ------------- | :------: |
-| `create_internet_gateway`            | Create Internet Gateway            | `bool`         | `true`        |    no    |
-| `internet_gateway_id`                | ID of existing Internet Gateway    | `string`       | `null`        |    no    |
-| `enable_nat_gateway`                 | Enable NAT Gateway                 | `bool`         | `false`       |    no    |
-| `single_nat_gateway`                 | Use single NAT Gateway for all AZs | `bool`         | `false`       |    no    |
-| `one_nat_gateway_per_az`             | Create one NAT Gateway per AZ      | `bool`         | `false`       |    no    |
-| `nat_gateway_eip_ids`                | List of EIP IDs for NAT Gateways   | `list(string)` | `[]`          |    no    |
-| `nat_gateway_destination_cidr_block` | CIDR for NAT Gateway routes        | `string`       | `"0.0.0.0/0"` |    no    |
-
-### Route Tables
-
-| Name                          | Description                 | Type   | Default | Required |
-| ----------------------------- | --------------------------- | ------ | ------- | :------: |
-| `create_public_route_table`   | Create public route table   | `bool` | `true`  |    no    |
-| `create_private_route_tables` | Create private route tables | `bool` | `true`  |    no    |
-
-### DNS Resolver Endpoints
-
-| Name                              | Description                                       | Type           | Default | Required |
-| --------------------------------- | ------------------------------------------------- | -------------- | ------- | :------: |
-| `enable_dns_resolver_endpoints`   | Enable DNS resolver endpoints                     | `bool`         | `false` |    no    |
-| `dns_resolver_subnet_ids`         | Subnet IDs for DNS resolver endpoints (minimum 2) | `list(string)` | `[]`    |    no    |
-| `dns_resolver_security_group_ids` | Security group IDs for DNS resolver endpoints     | `list(string)` | `[]`    |    no    |
-
-### VPC Endpoints
-
-| Name                    | Description                    | Type          | Default | Required |
-| ----------------------- | ------------------------------ | ------------- | ------- | :------: |
-| `vpc_endpoints`         | Map of VPC interface endpoints | `map(object)` | `{}`    |    no    |
-| `gateway_vpc_endpoints` | Map of VPC gateway endpoints   | `map(object)` | `{}`    |    no    |
-
-### Security Groups
-
-| Name                             | Description                          | Type           | Default | Required |
-| -------------------------------- | ------------------------------------ | -------------- | ------- | :------: |
-| `security_groups`                | Map of custom security groups        | `map(object)`  | `{}`    |    no    |
-| `default_security_group_ingress` | Default security group ingress rules | `list(object)` | `[]`    |    no    |
-| `default_security_group_egress`  | Default security group egress rules  | `list(object)` | `[]`    |    no    |
-
-### VPC Peering
-
-| Name           | Description                    | Type          | Default | Required |
-| -------------- | ------------------------------ | ------------- | ------- | :------: |
-| `vpc_peerings` | Map of VPC peering connections | `map(object)` | `{}`    |    no    |
-
-### Flow Logs
-
-| Name                                | Description                                      | Type     | Default              | Required |
-| ----------------------------------- | ------------------------------------------------ | -------- | -------------------- | :------: |
-| `enable_flow_logs`                  | Enable VPC Flow Logs                             | `bool`   | `false`              |    no    |
-| `flow_log_destination_type`         | Flow log destination type (cloud-watch-logs, s3) | `string` | `"cloud-watch-logs"` |    no    |
-| `flow_log_destination_arn`          | ARN of flow log destination                      | `string` | `null`               |    no    |
-| `flow_log_iam_role_arn`             | IAM role ARN for flow logs                       | `string` | `null`               |    no    |
-| `flow_log_traffic_type`             | Traffic type to log (ALL, ACCEPT, REJECT)        | `string` | `"ALL"`              |    no    |
-| `flow_log_log_format`               | Custom log format                                | `string` | `null`               |    no    |
-| `flow_log_max_aggregation_interval` | Max aggregation interval (60, 600)               | `number` | `600`                |    no    |
-
-### DHCP Options
-
-| Name                                | Description                  | Type           | Default | Required |
-| ----------------------------------- | ---------------------------- | -------------- | ------- | :------: |
-| `enable_dhcp_options`               | Enable custom DHCP options   | `bool`         | `false` |    no    |
-| `dhcp_options_domain_name`          | Domain name for DHCP options | `string`       | `null`  |    no    |
-| `dhcp_options_domain_name_servers`  | DNS servers for DHCP options | `list(string)` | `[]`    |    no    |
-| `dhcp_options_ntp_servers`          | NTP servers for DHCP options | `list(string)` | `[]`    |    no    |
-| `dhcp_options_netbios_name_servers` | NetBIOS name servers         | `list(string)` | `[]`    |    no    |
-| `dhcp_options_netbios_node_type`    | NetBIOS node type            | `number`       | `null`  |    no    |
-
-### Tagging
-
-| Name                       | Description                              | Type          | Default | Required |
-| -------------------------- | ---------------------------------------- | ------------- | ------- | :------: |
-| `public_subnet_tags`       | Additional tags for public subnets       | `map(string)` | `{}`    |    no    |
-| `private_subnet_tags`      | Additional tags for private subnets      | `map(string)` | `{}`    |    no    |
-| `database_subnet_tags`     | Additional tags for database subnets     | `map(string)` | `{}`    |    no    |
-| `intra_subnet_tags`        | Additional tags for intra subnets        | `map(string)` | `{}`    |    no    |
-| `internet_gateway_tags`    | Additional tags for Internet Gateway     | `map(string)` | `{}`    |    no    |
-| `nat_gateway_tags`         | Additional tags for NAT Gateways         | `map(string)` | `{}`    |    no    |
-| `public_route_table_tags`  | Additional tags for public route table   | `map(string)` | `{}`    |    no    |
-| `private_route_table_tags` | Additional tags for private route tables | `map(string)` | `{}`    |    no    |
-
-## Complete Output Reference
-
-### VPC Outputs
-
-| Name                            | Description               |
-| ------------------------------- | ------------------------- |
-| `vpc_id`                        | ID of the VPC             |
-| `vpc_arn`                       | ARN of the VPC            |
-| `vpc_cidr_block`                | CIDR block of the VPC     |
-| `vpc_secondary_cidr_blocks`     | Secondary CIDR blocks     |
-| `vpc_owner_id`                  | Owner ID of the VPC       |
-| `vpc_default_security_group_id` | Default security group ID |
-| `vpc_default_network_acl_id`    | Default network ACL ID    |
-| `vpc_default_route_table_id`    | Default route table ID    |
-| `vpc_ipv6_cidr_block`           | IPv6 CIDR block           |
-
-### Subnet Outputs
-
-| Name                          | Description                         |
-| ----------------------------- | ----------------------------------- |
-| `public_subnet_ids`           | List of public subnet IDs           |
-| `public_subnet_arns`          | List of public subnet ARNs          |
-| `public_subnet_cidr_blocks`   | List of public subnet CIDR blocks   |
-| `private_subnet_ids`          | List of private subnet IDs          |
-| `private_subnet_arns`         | List of private subnet ARNs         |
-| `private_subnet_cidr_blocks`  | List of private subnet CIDR blocks  |
-| `database_subnet_ids`         | List of database subnet IDs         |
-| `database_subnet_arns`        | List of database subnet ARNs        |
-| `database_subnet_cidr_blocks` | List of database subnet CIDR blocks |
-| `intra_subnet_ids`            | List of intra subnet IDs            |
-| `intra_subnet_arns`           | List of intra subnet ARNs           |
-| `intra_subnet_cidr_blocks`    | List of intra subnet CIDR blocks    |
-
-### Gateway & NAT Outputs
-
-| Name                     | Description                        |
-| ------------------------ | ---------------------------------- |
-| `internet_gateway_id`    | ID of the Internet Gateway         |
-| `internet_gateway_arn`   | ARN of the Internet Gateway        |
-| `nat_gateway_ids`        | List of NAT Gateway IDs            |
-| `nat_gateway_public_ips` | List of NAT Gateway public IPs     |
-| `nat_eip_ids`            | List of NAT Gateway EIP IDs        |
-| `nat_eip_public_ips`     | List of NAT Gateway EIP public IPs |
-
-### Route Table Outputs
-
-| Name                                  | Description                                 |
-| ------------------------------------- | ------------------------------------------- |
-| `public_route_table_id`               | ID of the public route table                |
-| `private_route_table_ids`             | List of private route table IDs             |
-| `public_route_table_association_ids`  | List of public route table association IDs  |
-| `private_route_table_association_ids` | List of private route table association IDs |
-
-### DNS & Endpoint Outputs
-
-| Name                        | Description                               |
-| --------------------------- | ----------------------------------------- |
-| `dns_resolver_endpoint_ids` | Map of DNS resolver endpoint IDs          |
-| `dns_resolver_endpoint_ips` | Map of DNS resolver endpoint IP addresses |
-| `vpc_endpoint_ids`          | Map of VPC endpoint IDs                   |
-| `vpc_endpoint_dns_names`    | Map of VPC endpoint DNS names             |
-| `gateway_vpc_endpoint_ids`  | Map of gateway VPC endpoint IDs           |
-
-### Security Group Outputs
-
-| Name                                     | Description                               |
-| ---------------------------------------- | ----------------------------------------- |
-| `security_group_ids`                     | Map of custom security group IDs          |
-| `security_group_arns`                    | Map of custom security group ARNs         |
-| `dns_resolver_default_security_group_id` | ID of default DNS resolver security group |
-
-### Peering & Flow Log Outputs
-
-| Name                            | Description                          |
-| ------------------------------- | ------------------------------------ |
-| `vpc_peering_connection_ids`    | Map of VPC peering connection IDs    |
-| `vpc_peering_connection_status` | Map of VPC peering connection status |
-| `flow_log_id`                   | ID of the VPC Flow Log               |
-| `flow_log_arn`                  | ARN of the VPC Flow Log              |
-| `dhcp_options_id`               | ID of the DHCP options set           |
-
-## Best Practices
-
-### 🏗️ Network Design
-
-- **CIDR Planning**: Use non-overlapping CIDR blocks across VPCs
-- **Subnet Sizing**: Plan subnet sizes based on expected resource count
-- **Multi-AZ**: Always deploy across multiple availability zones for HA
-- **Subnet Types**: Use dedicated subnets for different tiers (web, app, db)
-
-### 🔒 Security
-
-- **Least Privilege**: Configure security groups with minimal required access
-- **Network Segmentation**: Use separate subnets for different security zones
-- **Flow Logs**: Enable VPC Flow Logs for security monitoring
-- **Private Subnets**: Keep application and database tiers in private subnets
-
-### 💰 Cost Optimization
-
-- **NAT Gateway Strategy**: Use single NAT Gateway for dev/test environments
-- **VPC Endpoints**: Use gateway endpoints (free) over interface endpoints when possible
-- **EIP Management**: Reuse existing EIPs for NAT Gateways
-- **Flow Log Filtering**: Log only necessary traffic types to reduce costs
-
-### 🚀 Performance
-
-- **Placement Groups**: Consider placement groups for high-performance computing
-- **Enhanced Networking**: Enable enhanced networking for supported instances
-- **Local Zones**: Use local zones for ultra-low latency requirements
-
-## Troubleshooting
-
-### Common Issues
-
-**"DNS resolver endpoints require at least 2 subnet IDs"**
-
-- Ensure `dns_resolver_subnet_ids` contains at least 2 subnet IDs
-- Subnets must be in different availability zones
-
-**"NAT Gateway creation failed"**
-
-- Verify public subnets exist and have Internet Gateway route
-- Check EIP limits in your AWS account
-- Ensure subnets are in different AZs for multi-AZ NAT
-
-**"VPC peering connection failed"**
-
-- Verify peer VPC exists and CIDR blocks don't overlap
-- Check cross-account/cross-region permissions
-- Ensure auto-accept is configured correctly
-
-**"VPC endpoint creation failed"**
-
-- Verify service name is correct for your region
-- Check security group allows required traffic
-- Ensure subnets are in correct AZs for the service
-
-### Validation Commands
-
-```bash
-# Validate Terraform configuration
-terraform validate
-
-# Plan with variable validation
-terraform plan -var-file="terraform.tfvars"
-
-# Check VPC connectivity
-aws ec2 describe-vpcs --vpc-ids vpc-12345678
-
-# Verify DNS resolution
-nslookup example.com
-
-# Test NAT Gateway connectivity
-curl -I https://aws.amazon.com
-```
-
-## Migration Guide
-
-### From Existing VPC Module
-
-1. **Inventory Current Resources**
-
-   ```bash
-   terraform state list | grep aws_vpc
-   terraform state list | grep aws_subnet
-   ```
-
-2. **Import Existing Resources**
-
-   ```bash
-   terraform import module.network_hub.aws_vpc.main vpc-12345678
-   terraform import module.network_hub.aws_subnet.public[0] subnet-12345678
-   ```
-
-3. **Update Configuration**
-   - Set `create_vpc = false`
-   - Provide existing resource IDs
-   - Gradually enable new features
-
-### Version Compatibility
-
-| Module Version | Terraform Version | AWS Provider Version |
-| -------------- | ----------------- | -------------------- |
-| 1.x.x          | >= 1.3.0          | >= 5.0               |
-| 2.x.x          | >= 1.5.0          | >= 5.20              |
-
-## Contributing
-
-See the main repository [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines on:
-
-- Code standards and formatting
-- Testing requirements
-- Documentation updates
-- Pull request process
-
-## License
-
-This module is provided under the same license as the parent repository.
-
----
-
-**Last Updated**: January 2026  
-**Module Version**: 1.0.0  
-**Terraform Compatibility**: >= 1.3.0  
-**AWS Provider Compatibility**: >= 5.0
+## Inputs reference
+
+### Identity
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `name` | `string` | *(required)* | Prefix for every resource. |
+| `environment` | `string` | `"dev"` | Emitted as `Environment` tag. |
+| `tags` | `map(string)` | `{}` | Merged onto every resource. |
+
+### VPC
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `vpc_id` | `string` | `null` | Adopt an existing VPC instead of creating one. |
+| `create_vpc` | `bool` | `false` | Required when `vpc_id = null`. |
+| `vpc_cidr_block` | `string` | `"10.0.0.0/16"` | Primary CIDR. |
+| `secondary_cidr_blocks` | `list(string)` | `[]` | Extra IPv4 blocks. |
+| `enable_ipv6` | `bool` | `false` | Requests an Amazon-provided /56. |
+| `instance_tenancy` | `string` | `"default"` | `default` or `dedicated`. |
+| `enable_dns_support` | `bool` | `true` | |
+| `enable_dns_hostnames` | `bool` | `true` | |
+| `enable_network_address_usage_metrics` | `bool` | `false` | |
+
+### Subnets
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `availability_zones` | `list(string)` | 3 in us-east-1 | One CIDR per AZ per tier. |
+| `create_subnets` | `bool` | `true` | Disable to keep subnets outside the module. |
+| `public_subnets` / `private_subnets` / `database_subnets` / `intra_subnets` / `transit_subnets` | `list(string)` | various / `[]` | Per-tier CIDRs. |
+| `*_subnet_ids` | `list(string)` | `[]` | Existing subnet ids when adopting a VPC. |
+| `*_subnet_tags` | `map(string)` | `{}` | Extra per-tier tags. |
+| `map_public_ip_on_launch` | `bool` | `true` | Applies to public subnets. |
+
+### NAT
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `enable_nat_gateway` | `bool` | `true` | |
+| `single_nat_gateway` | `bool` | `false` | Cheaper, no HA. |
+| `one_nat_gateway_per_az` | `bool` | `true` | Default HA layout. |
+| `nat_gateway_subnet_ids` | `list(string)` | `[]` | Override which subnets host NATs. |
+| `nat_gateway_eip_ids` | `list(string)` | `[]` | Reuse pre-allocated EIPs. |
+| `nat_gateway_destination_cidr_block` | `string` | `"0.0.0.0/0"` | Private RT default route destination. |
+
+### Internet gateway
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `internet_gateway_id` | `string` | `null` | Adopt an existing IGW. |
+| `create_internet_gateway` | `bool` | `true` | |
+
+### Route tables
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `create_public_route_table` | `bool` | `true` | |
+| `create_private_route_tables` | `bool` | `true` | One per AZ. |
+| `create_database_route_table` | `bool` | `true` | Shared, no default route. |
+| `create_intra_route_table` | `bool` | `true` | Shared, no default route. |
+| `create_transit_route_table` | `bool` | `true` | Shared, no default route. |
+| `public_routes` / `private_routes` | list of objects | `[]` | Extra routes to install. |
+
+### VPC endpoints
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `vpc_endpoints` | `map(object(...))` | `{}` | Interface endpoints. |
+| `gateway_vpc_endpoints` | `map(object(...))` | `{}` | Gateway endpoints (S3/DDB). |
+
+### Security groups
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `security_groups` | `map(object(...))` | `{}` | Custom SGs. |
+| `manage_default_security_group` | `bool` | `false` | Adopt + restrict the default SG. |
+| `default_security_group_ingress` / `default_security_group_egress` | list of objects | `[]` | Rules applied when managed. |
+
+### Flow logs
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `enable_flow_logs` | `bool` | `false` | |
+| `flow_log_destination_type` | `string` | `"cloud-watch-logs"` | `cloud-watch-logs`, `s3`, or `kinesis-data-firehose`. |
+| `flow_log_destination_arn` | `string` | `null` | Caller-owned destination. |
+| `flow_log_iam_role_arn` | `string` | `null` | Required for CW Logs destination. |
+| `flow_log_traffic_type` | `string` | `"ALL"` | `ALL`, `ACCEPT`, `REJECT`. |
+| `flow_log_log_format` | `string` | `null` | Custom format; null uses AWS default. |
+| `flow_log_max_aggregation_interval` | `number` | `600` | 60 or 600. |
+
+### DNS resolver
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `enable_dns_resolver_endpoints` | `bool` | `false` | |
+| `dns_resolver_subnet_ids` | `list(string)` | `[]` | At least two AZs. |
+| `dns_resolver_security_group_ids` | `list(string)` | `[]` | Module builds a permissive demo SG when empty. |
+
+### Default NACL
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `manage_default_network_acl` | `bool` | `false` | |
+| `default_network_acl_ingress` / `default_network_acl_egress` | list of objects | `[]` | |
+
+### VPC peering
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `vpc_peerings` | `map(object(...))` | `{}` | Key is used in the resource name. |
+
+### Transit Gateway
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `transit_gateway_id` | `string` | `null` | Null disables the attachment. |
+| `transit_gateway_attachment_subnet_ids` | `list(string)` | `null` | Explicit override. Defaults to transit subnets, then private. |
+| `transit_gateway_appliance_mode` | `string` | `"disable"` | Enable for stateful inspection appliances. |
+| `transit_gateway_dns_support` | `string` | `"enable"` | |
+| `transit_gateway_ipv6_support` | `string` | `"disable"` | |
+| `transit_gateway_routes` | list of objects | `[]` | Each entry expands across `route_table_ids`. |
+
+## Outputs
+
+| Name | Description |
+|---|---|
+| `vpc_id` / `vpc_cidr_block` / `vpc_arn` | The VPC |
+| `vpc_default_security_group_id` | Default SG (when managed or created) |
+| `public_subnet_ids` / `*_subnet_ids` | Per-tier subnet ids |
+| `public_subnet_cidrs` / `*_subnet_cidrs` | Per-tier CIDR blocks |
+| `internet_gateway_id` | IGW id |
+| `nat_gateway_ids` / `nat_eip_ids` | NAT resources |
+| `public_route_table_ids` / `private_route_table_ids` | Route tables |
+| `database_route_table_id` / `intra_route_table_id` / `transit_route_table_id` | Single-entry RTs |
+| `security_group_ids` | Map of custom SG ids |
+| `vpc_endpoint_ids` / `gateway_vpc_endpoint_ids` | Endpoint ids |
+| `flow_log_id` | Flow log id |
+| `dns_resolver_endpoint_ids` | Inbound / outbound resolver ids |
+| `vpc_peering_connection_ids` | Peering ids |
+| `transit_gateway_attachment_id` | TGW attachment id |
+| `transit_gateway_attachment_subnet_ids` | Subnets the TGW attachment landed in |
+| `availability_zones` | AZ list actually used |
+| `summary` | Flattened object suitable for downstream modules |
+
+## Design notes
+
+**Why two existing-VPC paths?** The module supports both creating a VPC and
+adopting one. Adoption is common in migrations where the VPC was provisioned
+by CloudFormation / a previous Terraform state and the network team now
+wants to add things like route tables and endpoints around it without
+re-creating the VPC itself.
+
+**Why five subnet tiers?** Four is the common pattern (public / private /
+database / intra). The fifth tier, `transit`, carries the TGW or Cloud WAN
+attachment ENIs. Isolating them simplifies NACLs, makes route tables easier
+to reason about, and avoids mistakes where someone adds a workload route to
+the attachment's subnet.
+
+**Why per-AZ private route tables?** So you can route each private subnet's
+NAT traffic to the NAT gateway that lives in the same AZ. Cross-AZ NAT adds
+real money at scale (AWS charges for inter-AZ data transfer twice - once
+from the source AZ and once back from NAT's AZ).
+
+**Why `check` blocks instead of a `null_resource`?** Modern Terraform
+supports top-level `check` blocks for module-wide preconditions. They run at
+plan time, don't create state, and produce cleaner error output than the
+null_resource trick.
+
+**Custom SGs use inline rules.** The AWS provider supports both inline
+ingress/egress on `aws_security_group` and separate
+`aws_vpc_security_group_{ingress,egress}_rule` resources. Inline rules keep
+the module interface compact; for very large rule sets that change
+frequently, manage them as separate resources outside the module to avoid
+destructive rule replacement on updates.
+
+## Requirements
+
+- Terraform `>= 1.5.0` (needs `check` blocks)
+- AWS provider `~> 5.0`
