@@ -267,7 +267,6 @@ module "bg" {
   services = {
     # BLUE: current production.
     api_blue = {
-      role   = "master"
       image  = "${var.bg_image_base}:${var.bg_blue_image_tag}"
       cpu    = 256
       memory = 512
@@ -284,14 +283,14 @@ module "bg" {
         container_port   = local.bg_container_port
       }
 
-      stop_timeout = 45 # let in-flight requests drain
+      stop_timeout                      = 45 # let in-flight requests drain
+      health_check_grace_period_seconds = 30 # module requires >= 30 for LB-attached services
 
       tags = { Color = "blue" }
     }
 
     # GREEN: next release staging area.
     api_green = {
-      role   = "master"
       image  = "${var.bg_image_base}:${var.bg_green_image_tag}"
       cpu    = 256
       memory = 512
@@ -308,7 +307,8 @@ module "bg" {
         container_port   = local.bg_container_port
       }
 
-      stop_timeout = 45
+      stop_timeout                      = 45
+      health_check_grace_period_seconds = 30
 
       tags = { Color = "green" }
     }

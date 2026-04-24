@@ -1,28 +1,13 @@
-# Cluster
-
-output "cluster_id" {
-  description = "ECS cluster ID."
-  value       = aws_ecs_cluster.this.id
-}
-
-output "cluster_arn" {
-  description = "ECS cluster ARN."
-  value       = aws_ecs_cluster.this.arn
-}
+# Core — what most callers wire into downstream modules.
 
 output "cluster_name" {
   description = "ECS cluster name."
   value       = aws_ecs_cluster.this.name
 }
 
-# Services
-
-output "service_ids" {
-  description = "Service name to ECS service ID."
-  value = merge(
-    { for k, v in aws_ecs_service.autoscaled : k => v.id },
-    { for k, v in aws_ecs_service.static : k => v.id }
-  )
+output "cluster_arn" {
+  description = "ECS cluster ARN."
+  value       = aws_ecs_cluster.this.arn
 }
 
 output "service_names" {
@@ -33,7 +18,64 @@ output "service_names" {
   )
 }
 
-# Task definitions
+output "task_role_arns" {
+  description = "Service name to task role ARN (identity the app code runs as)."
+  value       = { for k, v in aws_iam_role.task : k => v.arn }
+}
+
+output "task_execution_role_arns" {
+  description = "Service name to execution role ARN. All map to the same ARN when per_service_execution_role = false."
+  value       = local.service_execution_role_arns
+}
+
+output "log_group_names" {
+  description = "Service name to CloudWatch log group name."
+  value       = { for k, v in aws_cloudwatch_log_group.service : k => v.name }
+}
+
+output "service_security_group_ids" {
+  description = "Service name to managed SG ID. Empty for services without create_security_group = true."
+  value       = { for k, v in aws_security_group.service : k => v.id }
+}
+
+output "summary" {
+  description = "Consolidated cluster summary, useful for downstream modules and CI output."
+  value = {
+    cluster_name        = aws_ecs_cluster.this.name
+    cluster_arn         = aws_ecs_cluster.this.arn
+    region              = local.region
+    environment         = var.environment
+    services            = keys(local.services)
+    autoscaled_services = keys(local.services_autoscaled)
+    capacity_providers  = local.cluster_capacity_providers
+    log_groups          = { for k, v in aws_cloudwatch_log_group.service : k => v.name }
+  }
+}
+
+# Advanced — for introspection, extra wiring, or debugging.
+
+output "cluster_id" {
+  description = "ECS cluster ID."
+  value       = aws_ecs_cluster.this.id
+}
+
+output "cluster_capacity_providers" {
+  description = "Capacity providers registered on the cluster."
+  value       = local.cluster_capacity_providers
+}
+
+output "service_ids" {
+  description = "Service name to ECS service ID."
+  value = merge(
+    { for k, v in aws_ecs_service.autoscaled : k => v.id },
+    { for k, v in aws_ecs_service.static : k => v.id }
+  )
+}
+
+output "service_deployment_controllers" {
+  description = "Service name to deployment controller type (ECS / CODE_DEPLOY / EXTERNAL)."
+  value       = { for k, v in local.services : k => v.deployment_controller }
+}
 
 output "task_definition_arns" {
   description = "Service name to current task definition ARN."
@@ -50,21 +92,9 @@ output "task_definition_revisions" {
   value       = { for k, v in aws_ecs_task_definition.this : k => v.revision }
 }
 
-# IAM
-
-output "task_execution_role_arn" {
-  description = "ARN of the shared task execution role."
-  value       = aws_iam_role.task_execution.arn
-}
-
-output "task_execution_role_name" {
-  description = "Name of the shared task execution role."
-  value       = aws_iam_role.task_execution.name
-}
-
-output "task_role_arns" {
-  description = "Service name to task role ARN."
-  value       = { for k, v in aws_iam_role.task : k => v.arn }
+output "container_names" {
+  description = "Service name to the list of container names in its task definition."
+  value       = { for k, v in local.services : k => [for c in v.containers : c.name] }
 }
 
 output "task_role_names" {
@@ -72,36 +102,20 @@ output "task_role_names" {
   value       = { for k, v in aws_iam_role.task : k => v.name }
 }
 
-# Networking
-
-output "service_security_group_ids" {
-  description = "Service name to managed security group ID. Empty for services without create_security_group = true."
-  value       = { for k, v in aws_security_group.service : k => v.id }
-}
-
-# Observability
-
-output "log_group_names" {
-  description = "Service name to CloudWatch log group name."
-  value       = { for k, v in aws_cloudwatch_log_group.service : k => v.name }
-}
-
 output "log_group_arns" {
-  description = "Service name to CloudWatch log group ARN."
+  description = "Service name to log group ARN."
   value       = { for k, v in aws_cloudwatch_log_group.service : k => v.arn }
 }
 
-output "dashboard_arn" {
-  description = "CloudWatch dashboard ARN. Null when create_cloudwatch_dashboard = false."
-  value       = var.create_cloudwatch_dashboard ? aws_cloudwatch_dashboard.this[0].dashboard_arn : null
+output "alarm_arns" {
+  description = "Service name to alarm ARNs, split by metric."
+  value = {
+    for k in keys(local.services) : k => {
+      cpu    = try(aws_cloudwatch_metric_alarm.cpu_high[k].arn, null)
+      memory = try(aws_cloudwatch_metric_alarm.memory_high[k].arn, null)
+    }
+  }
 }
-
-output "dashboard_name" {
-  description = "CloudWatch dashboard name. Null when create_cloudwatch_dashboard = false."
-  value       = var.create_cloudwatch_dashboard ? aws_cloudwatch_dashboard.this[0].dashboard_name : null
-}
-
-# Scheduled tasks (EventBridge)
 
 output "scheduled_task_rule_arns" {
   description = "Service name to EventBridge rule ARN for services with run_schedule set."
@@ -113,45 +127,12 @@ output "scheduled_task_rule_names" {
   value       = { for k, v in aws_cloudwatch_event_rule.scheduled_task : k => v.name }
 }
 
-# Autoscaling
-
 output "autoscaling_target_resource_ids" {
   description = "Service name to App Autoscaling resource ID."
   value       = { for k, v in aws_appautoscaling_target.this : k => v.resource_id }
 }
 
-# Cost estimates
-
-output "cost_estimates" {
-  description = <<-EOT
-    Rough monthly cost estimate per task (USD). Based on us-east-1 on-demand
-    Fargate pricing (vCPU $0.04048/hr, memory $0.004445/GB/hr) with spot and
-    economy discounts applied. Real costs depend on region, reserved capacity,
-    and actual usage.
-  EOT
-  value = {
-    for name, est in local.service_cost_estimates : name => {
-      strategy                       = est.strategy
-      vcpu_per_task                  = est.vcpu_per_task
-      memory_gb_per_task             = est.memory_gb
-      estimated_monthly_usd_per_task = est.estimated_monthly_usd_per_task
-    }
-  }
-}
-
-# Consolidated summary, useful for passing into dependent modules or CI output.
-
-output "summary" {
-  description = "Consolidated cluster summary."
-  value = {
-    cluster_name        = aws_ecs_cluster.this.name
-    cluster_arn         = aws_ecs_cluster.this.arn
-    region              = local.region
-    environment         = var.environment
-    services            = keys(local.services)
-    autoscaled_services = keys(local.services_autoscaled)
-    task_execution_role = aws_iam_role.task_execution.arn
-    log_groups          = { for k, v in aws_cloudwatch_log_group.service : k => v.name }
-    dashboard           = var.create_cloudwatch_dashboard ? aws_cloudwatch_dashboard.this[0].dashboard_name : null
-  }
+output "custom_scaling_policy_arns" {
+  description = "Map of '<service>:<policy-name>' to custom target-tracking policy ARN."
+  value       = { for k, v in aws_appautoscaling_policy.custom : k => v.arn }
 }

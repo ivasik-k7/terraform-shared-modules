@@ -8,7 +8,6 @@
 #   IAM roles           task execution + per-service task role
 #   Log group           /ecs/landing-ecs-basic/web (14 day retention)
 #   Alarms              CPU high, memory high
-#   Dashboard           auto-generated
 #
 # Apply:
 #   terraform init
@@ -48,7 +47,6 @@ module "basic" {
 
   services = {
     web = {
-      role   = "master"
       image  = "nginx:alpine"
       cpu    = 256
       memory = 512
@@ -61,6 +59,10 @@ module "basic" {
       desired_count = 1
       min_count     = 1
       max_count     = 3
+
+      # capacity_strategy defaults to "stable" (100% on-demand).
+      # enable_autoscaling defaults to true via the module; leave it so CPU
+      # + memory target tracking kicks in.
     }
   }
 }
@@ -68,9 +70,4 @@ module "basic" {
 output "basic_cluster_name" {
   value       = module.basic.cluster_name
   description = "Name of the basic-example ECS cluster."
-}
-
-output "basic_cost_estimate" {
-  value       = module.basic.cost_estimates
-  description = "Estimated monthly cost per task for the basic example."
 }

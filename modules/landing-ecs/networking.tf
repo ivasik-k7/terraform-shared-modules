@@ -1,7 +1,5 @@
-# Per-service security group, created only when create_security_group is true
-# (either on the service or via the module-wide default). There are no inbound
-# rules by design — callers add ingress with aws_vpc_security_group_ingress_rule
-# outside the module.
+# Empty SG per service — ingress rules are the caller's concern, added
+# with aws_vpc_security_group_ingress_rule outside the module.
 resource "aws_security_group" "service" {
   for_each = local.services_with_sg
 
@@ -16,7 +14,8 @@ resource "aws_security_group" "service" {
   }
 }
 
-# Containers need to reach ECR, Secrets Manager, SSM, CloudWatch Logs, etc.
+# Fargate tasks need egress for ECR pulls, Secrets Manager, SSM, CW Logs.
+# Narrow via VPC endpoints + a restrictive egress list if you need to.
 resource "aws_vpc_security_group_egress_rule" "service_all" {
   for_each = local.services_with_sg
 

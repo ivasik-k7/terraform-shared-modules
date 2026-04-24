@@ -13,9 +13,9 @@ output "service_names" {
   value       = module.ecs.service_names
 }
 
-output "task_execution_role_arn" {
-  description = "Shared task execution role ARN."
-  value       = module.ecs.task_execution_role_arn
+output "task_execution_role_arns" {
+  description = "Per-service task execution role ARNs (one per service when per_service_execution_role = true, which is the default)."
+  value       = module.ecs.task_execution_role_arns
 }
 
 output "task_role_arns" {
@@ -26,16 +26,6 @@ output "task_role_arns" {
 output "log_group_names" {
   description = "CloudWatch log group names per service."
   value       = module.ecs.log_group_names
-}
-
-output "dashboard_name" {
-  description = "CloudWatch dashboard name."
-  value       = module.ecs.dashboard_name
-}
-
-output "cost_estimates" {
-  description = "Estimated monthly cost per task per service (USD)."
-  value       = module.ecs.cost_estimates
 }
 
 output "api_security_group_id" {

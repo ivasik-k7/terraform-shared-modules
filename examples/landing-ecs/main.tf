@@ -124,13 +124,13 @@ resource "aws_lb_target_group" "api" {
 # Example scenario: an on-prem monolith being broken into services on ECS.
 #
 # Service topology:
-#   api      (master)    on-demand Fargate, ALB, X-Ray, autoscale 2-10
-#   worker   (worker)    economy (Spot + Graviton ARM64), autoscale 0-20
-#   migrate  (scheduled) spot only, desired_count=0, triggered externally
+#   api      stable Fargate, ALB, X-Ray sidecar, autoscale 2-10
+#   worker   spot_preferred + Graviton ARM64, autoscale 0-20 on SQS depth
+#   migrate  spot_only, desired_count=0, triggered externally (no autoscaling)
 #
 # Cost profile:
-#   prod:    api=stable, worker=economy, no schedule_scaling
-#   staging: schedule_scaling scales both to zero overnight
+#   prod:    schedule_scaling disabled; services sized for steady load
+#   staging: schedule_scaling scales api + worker to zero overnight
 module "ecs" {
   source = "../../modules/landing-ecs"
 
@@ -161,14 +161,53 @@ module "ecs" {
   services = {
 
     # REST API. Stable on-demand Fargate for predictable latency, with ALB,
-    # X-Ray, health check, and autoscaling between 2 and 10 replicas.
+    # an X-Ray daemon sidecar, health check, and autoscaling 2-10.
+    #
+    # X-Ray is now declared as a regular sidecar via the `containers` map —
+    # the old xray_enabled = true shortcut was removed in favor of the
+    # multi-container API.
     api = {
-      role              = "master"
-      image             = "${local.ecr_base}/${var.project}-api:${var.app_version}"
       cpu               = 512
       memory            = 1024
       port              = 8080
       capacity_strategy = "stable"
+
+      containers = {
+        app = {
+          image     = "${local.ecr_base}/${var.project}-api:${var.app_version}"
+          cpu       = 480
+          memory    = 768
+          essential = true
+          port      = 8080
+
+          environment = {
+            PORT      = "8080"
+            LOG_LEVEL = var.environment == "prod" ? "warn" : "debug"
+            TRACING   = "true"
+          }
+
+          secrets = {
+            DATABASE_URL = aws_secretsmanager_secret.db.arn
+          }
+
+          health_check = {
+            command      = ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+            interval     = 30
+            timeout      = 5
+            retries      = 3
+            start_period = 60
+          }
+        }
+
+        xray = {
+          image     = "amazon/aws-xray-daemon:3"
+          cpu       = 32
+          memory    = 256
+          essential = false
+          port      = 2000
+          protocol  = "udp"
+        }
+      }
 
       desired_count = 2
       min_count     = 2
@@ -186,25 +225,8 @@ module "ecs" {
 
       load_balancer = {
         target_group_arn = aws_lb_target_group.api.arn
+        container_name   = "app"
         container_port   = 8080
-      }
-
-      health_check = {
-        command      = ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
-        interval     = 30
-        timeout      = 5
-        retries      = 3
-        start_period = 60
-      }
-
-      secrets = {
-        DATABASE_URL = aws_secretsmanager_secret.db.arn
-      }
-
-      environment = {
-        PORT      = "8080"
-        LOG_LEVEL = var.environment == "prod" ? "warn" : "debug"
-        TRACING   = "true"
       }
 
       task_role_statements = [
@@ -222,13 +244,26 @@ module "ecs" {
           sid       = "JobEnqueue"
           actions   = ["sqs:SendMessage"]
           resources = [aws_sqs_queue.jobs.arn]
+        },
+        {
+          sid       = "XRayWrite"
+          actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+          resources = ["*"]
         }
       ]
 
-      xray_enabled                      = true
       enable_circuit_breaker            = true
       enable_rollback                   = true
       health_check_grace_period_seconds = 60
+
+      # Tighter autoscaling targets for the user-facing service.
+      cpu_target_value    = 55
+      memory_target_value = 70
+
+      # Page via a dedicated SNS topic on CPU > 85, memory > 90.
+      alarm_cpu_threshold    = 85
+      alarm_memory_threshold = 90
+      alarm_actions          = [aws_sns_topic.alerts.arn]
 
       tags = { Component = "api" }
     }
@@ -236,12 +271,16 @@ module "ecs" {
     # Background job processor. Spot + Graviton is fine because tasks are
     # stateless and SQS re-queues on visibility-timeout expiry. Autoscales
     # between 0 and 20 on CPU pressure.
+    #
+    # Note: capacity_strategy = "economy" only picks the cheapest providers
+    # (Fargate Spot). The ARM64 architecture is a separate axis and must be
+    # set explicitly; it's no longer implied by the capacity strategy.
     worker = {
-      role              = "worker"
       image             = "${local.ecr_base}/${var.project}-worker:${var.app_version}"
       cpu               = 256
       memory            = 512
-      capacity_strategy = "economy"
+      capacity_strategy = "spot_preferred"
+      cpu_architecture  = "ARM64"
 
       desired_count = 1
       min_count     = 0
@@ -287,6 +326,26 @@ module "ecs" {
         start_period = 30
       }
 
+      # Worker is CPU-bound; skip the memory target-tracking policy since
+      # memory stays flat and auto-scaling would keep us over-provisioned.
+      enable_memory_autoscaling = false
+
+      # Custom scaling on SQS backlog: add a worker per 50 visible messages.
+      custom_scaling_policies = [
+        {
+          name         = "queue-depth"
+          target_value = 50
+          customized_metric = {
+            metric_name = "ApproximateNumberOfMessagesVisible"
+            namespace   = "AWS/SQS"
+            statistic   = "Average"
+            dimensions = [
+              { name = "QueueName", value = aws_sqs_queue.jobs.name },
+            ]
+          }
+        }
+      ]
+
       tags = { Component = "worker" }
     }
 
@@ -294,12 +353,13 @@ module "ecs" {
     # pipeline step (or `aws ecs update-service --desired-count 1`). Spot is
     # safe here — if it gets interrupted we just rerun.
     migrate = {
-      role              = "scheduled"
       image             = "${local.ecr_base}/${var.project}-api:${var.app_version}"
       cpu               = 512
       memory            = 1024
       capacity_strategy = "spot_only"
 
+      # Disabling autoscaling is mandatory for services triggered externally
+      # (run_schedule or manual RunTask / update-service bumps).
       desired_count      = 0
       min_count          = 0
       max_count          = 1
@@ -322,10 +382,9 @@ module "ecs" {
     }
   }
 
-  log_retention_days          = var.environment == "prod" ? 90 : 14
-  create_cloudwatch_alarms    = true
-  create_cloudwatch_dashboard = true
-  alarm_actions               = [aws_sns_topic.alerts.arn]
-  alarm_cpu_threshold         = 75
-  alarm_memory_threshold      = 80
+  log_retention_days       = var.environment == "prod" ? 90 : 14
+  create_cloudwatch_alarms = true
+  alarm_actions            = [aws_sns_topic.alerts.arn]
+  alarm_cpu_threshold      = 75
+  alarm_memory_threshold   = 80
 }

@@ -1,5 +1,6 @@
-# Services with role = "scheduled" keep desired_count = 0 and rely on an
-# EventBridge rule to launch standalone tasks on the configured cadence.
+# Services with run_schedule set keep desired_count = 0. EventBridge calls
+# RunTask against the task definition on the cadence. Works because the
+# validation rule on enable_autoscaling prevents mixing with App Autoscaling.
 data "aws_iam_policy_document" "eventbridge_assume" {
   count = length(local.services_scheduled_run) > 0 ? 1 : 0
 
@@ -31,8 +32,8 @@ resource "aws_iam_role_policy_attachment" "eventbridge_ecs" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonEC2ContainerServiceEventsRole"
 }
 
-# PassRole for the task execution role plus the per-service task roles,
-# so EventBridge can hand them to the task at launch.
+# iam:PassRole on both the execution + task roles; RunTask fails at start
+# otherwise. Shape depends on per_service_execution_role.
 data "aws_iam_policy_document" "eventbridge_passrole" {
   count = length(local.services_scheduled_run) > 0 ? 1 : 0
 
@@ -41,8 +42,10 @@ data "aws_iam_policy_document" "eventbridge_passrole" {
     effect  = "Allow"
     actions = ["iam:PassRole"]
     resources = concat(
-      [aws_iam_role.task_execution.arn],
-      [for k in keys(local.services_scheduled_run) : aws_iam_role.task[k].arn]
+      var.per_service_execution_role
+      ? [for k in keys(local.services_scheduled_run) : aws_iam_role.task_execution_service[k].arn]
+      : [aws_iam_role.task_execution_shared[0].arn],
+      [for k in keys(local.services_scheduled_run) : aws_iam_role.task[k].arn],
     )
   }
 }
