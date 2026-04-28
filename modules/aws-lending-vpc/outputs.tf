@@ -1,5 +1,6 @@
+# =============================================================================
 # VPC
-
+# =============================================================================
 output "vpc_id" {
   description = "VPC id (created or adopted)."
   value       = local.vpc_id
@@ -7,9 +8,7 @@ output "vpc_id" {
 
 output "vpc_cidr_block" {
   description = "Primary VPC CIDR."
-  value = local.using_existing_vpc ? data.aws_vpc.existing[0].cidr_block : (
-    local.should_create_vpc ? aws_vpc.this[0].cidr_block : null
-  )
+  value       = local.vpc_cidr_block
 }
 
 output "vpc_arn" {
@@ -20,14 +19,15 @@ output "vpc_arn" {
 }
 
 output "vpc_default_security_group_id" {
-  description = "Default SG id for the VPC. Only populated when the module created the VPC or is actively managing the default SG."
+  description = "Default SG id for the VPC. Populated when the module created the VPC, or when manage_default_security_group is on."
   value = local.should_create_vpc ? aws_vpc.this[0].default_security_group_id : (
     var.manage_default_security_group ? aws_default_security_group.this[0].id : null
   )
 }
 
-# Subnets
-
+# =============================================================================
+# Subnets — flat lists per tier
+# =============================================================================
 output "public_subnet_ids" {
   description = "Public subnet ids."
   value       = local.public_subnet_ids_effective
@@ -88,8 +88,20 @@ output "transit_subnet_cidrs" {
   )
 }
 
-# Gateways
+# =============================================================================
+# Subnets — keyed by AZ (DX win for downstream modules)
+# =============================================================================
+# Lets consumers do:
+#   subnet_id = module.vpc.subnets_by_az["eu-west-1a"].private
+# instead of slicing flat lists by index. Resilient to AZ reorders.
+output "subnets_by_az" {
+  description = "Per-AZ map of tier -> subnet id. Tier values are null when the tier is disabled."
+  value       = local.subnets_by_az
+}
 
+# =============================================================================
+# Gateways
+# =============================================================================
 output "internet_gateway_id" {
   description = "Internet Gateway id."
   value       = local.internet_gateway_id
@@ -101,12 +113,18 @@ output "nat_gateway_ids" {
 }
 
 output "nat_eip_ids" {
-  description = "NAT gateway EIP allocation ids (only for EIPs the module provisioned)."
+  description = "NAT gateway EIP allocation ids (only EIPs the module allocated; pre-supplied EIPs are not echoed here)."
   value       = aws_eip.nat[*].id
 }
 
-# Route tables
+output "nat_public_ips" {
+  description = "Public IPs of the NAT gateways. Useful for on-prem firewall allowlists."
+  value       = aws_nat_gateway.this[*].public_ip
+}
 
+# =============================================================================
+# Route tables
+# =============================================================================
 output "public_route_table_ids" {
   description = "Public route table ids."
   value       = aws_route_table.public[*].id
@@ -132,16 +150,27 @@ output "transit_route_table_id" {
   value       = length(aws_route_table.transit) > 0 ? aws_route_table.transit[0].id : null
 }
 
-# Security groups, endpoints, resolver
-
+# =============================================================================
+# Endpoints, SGs, resolver
+# =============================================================================
 output "security_group_ids" {
-  description = "Custom security group ids keyed by the short name given in var.security_groups."
+  description = "Custom SG ids keyed by short name."
   value       = { for k, v in aws_security_group.custom : k => v.id }
 }
 
+output "endpoint_security_group_id" {
+  description = "Default SG id used by interface endpoints when the caller didn't pass one. Null when not in use."
+  value       = local.default_endpoint_security_group_id
+}
+
 output "vpc_endpoint_ids" {
-  description = "Interface VPC endpoint ids keyed by short name."
+  description = "Interface VPC endpoint ids keyed by short name (preset + explicit, merged)."
   value       = { for k, v in aws_vpc_endpoint.interface : k => v.id }
+}
+
+output "vpc_endpoint_dns_entries" {
+  description = "Interface endpoint private DNS entries. Useful for app config when private DNS is disabled."
+  value       = { for k, v in aws_vpc_endpoint.interface : k => v.dns_entry }
 }
 
 output "gateway_vpc_endpoint_ids" {
@@ -162,15 +191,16 @@ output "dns_resolver_endpoint_ids" {
   }
 }
 
+# =============================================================================
 # Peering and TGW
-
+# =============================================================================
 output "vpc_peering_connection_ids" {
   description = "VPC peering connection ids keyed by short name."
   value       = { for k, v in aws_vpc_peering_connection.this : k => v.id }
 }
 
 output "transit_gateway_attachment_id" {
-  description = "Transit Gateway VPC attachment id. Null when not attached."
+  description = "TGW VPC attachment id. Null when not attached."
   value       = var.transit_gateway_id != null ? aws_ec2_transit_gateway_vpc_attachment.this[0].id : null
 }
 
@@ -179,18 +209,63 @@ output "transit_gateway_attachment_subnet_ids" {
   value       = var.transit_gateway_id != null ? local.transit_gateway_attachment_subnets : []
 }
 
-# Availability + summary
-
+# =============================================================================
+# Misc + summary
+# =============================================================================
 output "availability_zones" {
   description = "AZs the module distributed subnets across."
   value       = local.azs
 }
 
+# Single object suitable for "wire into downstream module" patterns. Keeps
+# call-sites short:
+#   module "ecs_cluster" {
+#     network = module.vpc.network
+#   }
+output "network" {
+  description = "Consolidated network description. Pass into downstream workload modules."
+  value = {
+    vpc_id        = local.vpc_id
+    vpc_cidr      = local.vpc_cidr_block
+    azs           = local.azs
+    subnets_by_az = local.subnets_by_az
+    subnets = {
+      public   = local.public_subnet_ids_effective
+      private  = local.private_subnet_ids_effective
+      database = local.database_subnet_ids_effective
+      intra    = local.intra_subnet_ids_effective
+      transit  = local.transit_subnet_ids_effective
+    }
+    igw_id          = local.internet_gateway_id
+    nat_gateway_ids = aws_nat_gateway.this[*].id
+    nat_public_ips  = aws_nat_gateway.this[*].public_ip
+    route_tables = {
+      public   = aws_route_table.public[*].id
+      private  = aws_route_table.private[*].id
+      database = length(aws_route_table.database) > 0 ? aws_route_table.database[0].id : null
+      intra    = length(aws_route_table.intra) > 0 ? aws_route_table.intra[0].id : null
+      transit  = length(aws_route_table.transit) > 0 ? aws_route_table.transit[0].id : null
+    }
+    security_groups = {
+      custom            = { for k, v in aws_security_group.custom : k => v.id }
+      default           = local.should_create_vpc ? aws_vpc.this[0].default_security_group_id : null
+      endpoints_default = local.default_endpoint_security_group_id
+    }
+    endpoints = {
+      interface = { for k, v in aws_vpc_endpoint.interface : k => v.id }
+      gateway   = { for k, v in aws_vpc_endpoint.gateway : k => v.id }
+    }
+    tgw_attachment_id = var.transit_gateway_id != null ? aws_ec2_transit_gateway_vpc_attachment.this[0].id : null
+  }
+}
+
+# Backward-compat with callers that referenced the old `summary` output. Same
+# keys as the v1 module; new code should use `network` above.
 output "summary" {
-  description = "Consolidated view of the network. Handy for feeding downstream modules."
+  description = "DEPRECATED: use `network` instead. Kept for backward compatibility with the previous network-hub module."
   value = {
     vpc_id           = local.vpc_id
-    vpc_cidr         = local.using_existing_vpc ? data.aws_vpc.existing[0].cidr_block : (local.should_create_vpc ? aws_vpc.this[0].cidr_block : null)
+    vpc_cidr         = local.vpc_cidr_block
     azs              = local.azs
     public_subnets   = local.public_subnet_ids_effective
     private_subnets  = local.private_subnet_ids_effective

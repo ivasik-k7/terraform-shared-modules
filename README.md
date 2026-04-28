@@ -260,19 +260,22 @@ Simple Notification Service for pub/sub messaging and mobile notifications.
 
 ---
 
-### <img src="https://cdn.worldvectorlogo.com/logos/aws-vpc-1.svg" alt="VPC" height="24"/> [Network Hub](./modules/network-hub)
+### <img src="https://cdn.worldvectorlogo.com/logos/aws-vpc-1.svg" alt="VPC" height="24"/> [AWS Lending VPC](./modules/aws-lending-vpc)
 
-Enterprise-grade VPC module for centralized network infrastructure.
+Migration-factory VPC module. Per-application landing zone VPCs with TGW + VPC endpoints.
 
 **Key Features:**
 
-- Multi-AZ VPC with public/private/db subnets
-- Transit Gateway integration ready
-- VPC Peering and Endpoints
-- Flow Logs and DNS configuration
-- Flexible NAT Gateway strategies
+- 5 subnet tiers (public/private/database/intra/transit) with optional auto-carve from a single CIDR
+- Transit Gateway attachment in dedicated transit subnets, with route expansion across multiple route tables
+- Region-aware VPC endpoints — pass `"ssm"`, the module adds `com.amazonaws.<region>` for you
+- Curated endpoint bundles (`interface_endpoint_services = ["ssm","ssmmessages",...]`)
+- Per-AZ NAT (HA) or single NAT (cheap), or skip entirely for central-egress topologies
+- Inter-tier SG rule shortcut for the recurring `app -> db` pattern
+- Optional FinOps tag enforcement (Project / Team / CostCenter / Owner)
+- Plan-time checks for the most common foot-guns (NAT layout, flow log role, DNS resolver AZ count, ...)
 
-**Use Case:** Landing zone network foundation, hub-and-spoke architectures
+**Use Case:** Migration factory landing zones, per-application VPCs lent to workloads with TGW + endpoints providing connectivity
 
 ---
 

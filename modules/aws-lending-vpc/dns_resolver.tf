@@ -1,16 +1,19 @@
-# Route 53 Resolver inbound + outbound endpoints, used for hybrid DNS:
-#   inbound   on-prem -> AWS (for private hosted zones)
-#   outbound  AWS     -> on-prem (for corporate DNS forwarding)
+# Route 53 Resolver inbound + outbound endpoints for hybrid DNS.
+#   inbound   on-prem -> AWS  (DNS queries from corp resolvers into private hosted zones)
+#   outbound  AWS -> on-prem  (forwarder rules to corporate DNS)
 #
-# The caller supplies the subnets (at least two in different AZs) and
-# optionally the SGs. If no SG is provided, the module builds a permissive
-# one purely so the demo spins up; real deployments must pass their own.
+# Subnets default to the intra tier when the caller didn't specify them; if
+# intra is empty the module falls back to private. AWS requires endpoints
+# to span at least 2 AZs.
+#
+# The auto-built SG is permissive (53/tcp+udp from 0.0.0.0/0). Replace it in
+# any non-sandbox deployment.
 
 resource "aws_security_group" "dns_resolver" {
   count = var.enable_dns_resolver_endpoints && length(var.dns_resolver_security_group_ids) == 0 ? 1 : 0
 
   name        = "${var.name}-dns-resolver"
-  description = "Route 53 Resolver endpoints (module-default). Replace in production."
+  description = "Route 53 Resolver endpoints (module-default, replace in prod)."
   vpc_id      = local.vpc_id
 
   ingress {
@@ -40,14 +43,14 @@ resource "aws_security_group" "dns_resolver" {
 }
 
 resource "aws_route53_resolver_endpoint" "inbound" {
-  count = var.enable_dns_resolver_endpoints && length(var.dns_resolver_subnet_ids) >= 2 ? 1 : 0
+  count = var.enable_dns_resolver_endpoints && length(local.effective_dns_resolver_subnet_ids) >= 2 ? 1 : 0
 
   name               = "${var.name}-dns-inbound"
   direction          = "INBOUND"
   security_group_ids = local.dns_resolver_security_group_ids
 
   dynamic "ip_address" {
-    for_each = slice(var.dns_resolver_subnet_ids, 0, min(2, length(var.dns_resolver_subnet_ids)))
+    for_each = slice(local.effective_dns_resolver_subnet_ids, 0, min(2, length(local.effective_dns_resolver_subnet_ids)))
     content {
       subnet_id = ip_address.value
     }
@@ -59,14 +62,14 @@ resource "aws_route53_resolver_endpoint" "inbound" {
 }
 
 resource "aws_route53_resolver_endpoint" "outbound" {
-  count = var.enable_dns_resolver_endpoints && length(var.dns_resolver_subnet_ids) >= 2 ? 1 : 0
+  count = var.enable_dns_resolver_endpoints && length(local.effective_dns_resolver_subnet_ids) >= 2 ? 1 : 0
 
   name               = "${var.name}-dns-outbound"
   direction          = "OUTBOUND"
   security_group_ids = local.dns_resolver_security_group_ids
 
   dynamic "ip_address" {
-    for_each = slice(var.dns_resolver_subnet_ids, 0, min(2, length(var.dns_resolver_subnet_ids)))
+    for_each = slice(local.effective_dns_resolver_subnet_ids, 0, min(2, length(local.effective_dns_resolver_subnet_ids)))
     content {
       subnet_id = ip_address.value
     }

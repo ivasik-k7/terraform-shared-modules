@@ -1,8 +1,10 @@
-# Peering connections keyed by a short name.
+# Peering connections, keyed by short name. Module creates the requester
+# side; the accepter side (the peer VPC accepting this request) lives in
+# the peer's Terraform.
 #
-# For accepter-side resources (the peer VPC accepting this request), manage
-# them in the peer's Terraform. auto_accept works only for same-account,
-# same-region peerings.
+# auto_accept works ONLY when both VPCs are in the same account AND region.
+# Cross-account or cross-region peerings need an explicit
+# aws_vpc_peering_connection_accepter on the other side.
 resource "aws_vpc_peering_connection" "this" {
   for_each = var.vpc_peerings
 
@@ -17,8 +19,11 @@ resource "aws_vpc_peering_connection" "this" {
   })
 }
 
-# One route per (peering, route table). The caller lists the route tables
-# that should learn about the peer's CIDR.
+# One route per (peering, route table). The caller lists which RTs should
+# learn about the peer's CIDR.
+#
+# Symmetric routes on the OTHER side (the peer VPC's RTs back to local CIDR)
+# are not this module's job — manage those in the peer's Terraform.
 resource "aws_route" "peering" {
   for_each = merge([
     for k, v in var.vpc_peerings : {

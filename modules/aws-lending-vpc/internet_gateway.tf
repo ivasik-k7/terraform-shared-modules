@@ -1,5 +1,5 @@
-# Created only when the module is building the VPC and the caller hasn't
-# supplied an existing IGW id.
+# Only created when we're building the VPC and the caller didn't pass an
+# IGW id to adopt. Adopted IGWs are referenced via local.internet_gateway_id.
 resource "aws_internet_gateway" "this" {
   count = local.should_create_vpc && var.create_internet_gateway && var.internet_gateway_id == null ? 1 : 0
 

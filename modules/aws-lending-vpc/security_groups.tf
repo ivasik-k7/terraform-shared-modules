@@ -1,6 +1,7 @@
-# Custom security groups. Rules are declared inline on the SG for brevity.
-# If you need to add/remove rules without destructive churn at scale, manage
-# rules outside the module via aws_vpc_security_group_{ingress,egress}_rule.
+# Custom SGs declared via var.security_groups. Inline rules — convenient for
+# small SGs, but if you have a large or churn-heavy rule set, prefer
+# aws_vpc_security_group_{ingress,egress}_rule outside the module so edits
+# don't replace the whole SG.
 resource "aws_security_group" "custom" {
   for_each = var.security_groups
 
@@ -42,14 +43,19 @@ resource "aws_security_group" "custom" {
     Name = "${var.name}-${each.key}"
   })
 
+  # create_before_destroy avoids "SG in use by ENIs" errors when names change.
   lifecycle {
     create_before_destroy = true
   }
 }
 
-# AWS creates a default SG on every VPC that cannot be deleted. Best practice
-# is to adopt it and strip its rules (default has "allow all from self" which
-# is often undesirable). Opt in via manage_default_security_group = true.
+# Default SG. AWS attaches this to every ENI without an explicit SG, and it
+# CAN'T be deleted. Best practice: adopt + strip its rules so nothing slips
+# through accidentally.
+#
+# DESTRUCTIVE: turning manage_default_security_group on overwrites every
+# rule, including ones added out-of-band. Don't do this lightly on shared
+# VPCs.
 resource "aws_default_security_group" "this" {
   count = var.manage_default_security_group ? 1 : 0
 

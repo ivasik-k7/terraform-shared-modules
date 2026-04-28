@@ -209,3 +209,5 @@ local-testing/
 *.bak
 *.backup
 .terraform.lock.hcl
+
+cost-projection-aws-migration.md

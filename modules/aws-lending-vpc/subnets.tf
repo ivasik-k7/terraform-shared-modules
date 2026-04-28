@@ -1,17 +1,17 @@
-# All tiers are created only when the module is building a new VPC and
-# create_subnets is true. Existing-VPC adoption passes subnet IDs in directly.
-#
-# Subnet count per tier equals the AZ list length (enforced by preconditions
-# in vpc.tf). Index i always maps to AZ i, which keeps downstream route-table
-# associations predictable.
+# Subnets are only created when:
+#   - we're building the VPC ourselves AND
+#   - var.create_subnets is true (default).
+# Index i ALWAYS maps to AZ i so route-table associations stay predictable.
+# count is fine here because the per-tier lists never reorder; they're
+# CIDR-by-AZ and the AZ list is sorted upstream.
 
-# Public: reachable from the internet. Backs IGW-facing workloads and NAT
-# gateways.
+# Public: routed to the IGW. Hosts ALBs, bastions, NAT gateways. Anything
+# you put here gets a public IP if map_public_ip_on_launch is true.
 resource "aws_subnet" "public" {
   count = local.should_create_vpc && var.create_subnets ? local.public_subnet_count : 0
 
   vpc_id                  = aws_vpc.this[0].id
-  cidr_block              = var.public_subnets[count.index]
+  cidr_block              = local.effective_public_subnets[count.index]
   availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = var.map_public_ip_on_launch
 
@@ -21,13 +21,12 @@ resource "aws_subnet" "public" {
   })
 }
 
-# Private: general-purpose workloads. Default route goes through NAT when
-# enable_nat_gateway = true.
+# Private: workloads. Default route hops to the NAT in the same AZ.
 resource "aws_subnet" "private" {
   count = local.should_create_vpc && var.create_subnets ? local.private_subnet_count : 0
 
   vpc_id            = aws_vpc.this[0].id
-  cidr_block        = var.private_subnets[count.index]
+  cidr_block        = local.effective_private_subnets[count.index]
   availability_zone = local.azs[count.index]
 
   tags = merge(local.base_tags, var.private_subnet_tags, {
@@ -36,13 +35,13 @@ resource "aws_subnet" "private" {
   })
 }
 
-# Database: isolated subnets for RDS/ElastiCache. No default route out.
-# Typically associated with an aws_db_subnet_group in the consumer module.
+# Database: isolated. No default route — RDS doesn't need internet, and
+# leaving a route off prevents accidental egress paths from the data tier.
 resource "aws_subnet" "database" {
   count = local.should_create_vpc && var.create_subnets ? local.database_subnet_count : 0
 
   vpc_id            = aws_vpc.this[0].id
-  cidr_block        = var.database_subnets[count.index]
+  cidr_block        = local.effective_database_subnets[count.index]
   availability_zone = local.azs[count.index]
 
   tags = merge(local.base_tags, var.database_subnet_tags, {
@@ -51,13 +50,13 @@ resource "aws_subnet" "database" {
   })
 }
 
-# Intra: internal-only traffic. Hosts things like VPC endpoint ENIs, EKS
-# control-plane ENIs, and internal load balancers. No default route out.
+# Intra: internal-only. Hosts VPC endpoint ENIs, EKS control-plane ENIs,
+# internal LBs. Nothing here ever needs internet.
 resource "aws_subnet" "intra" {
   count = local.should_create_vpc && var.create_subnets ? local.intra_subnet_count : 0
 
   vpc_id            = aws_vpc.this[0].id
-  cidr_block        = var.intra_subnets[count.index]
+  cidr_block        = local.effective_intra_subnets[count.index]
   availability_zone = local.azs[count.index]
 
   tags = merge(local.base_tags, var.intra_subnet_tags, {
@@ -66,18 +65,19 @@ resource "aws_subnet" "intra" {
   })
 }
 
-# Transit: dedicated host subnets for the Transit Gateway / Cloud WAN
-# attachment ENIs. Best practice for hybrid setups:
-#   - Keep the attachment off workload subnets so on-prem routing decisions
-#     aren't intermingled with workload traffic.
-#   - /28 per AZ is enough (AWS reserves 5 IPs; a few more ENIs fit).
-#   - No default route added by this module; TGW routing happens at the TGW
-#     route table level.
+# Transit: dedicated host subnets for TGW / Cloud WAN attachment ENIs.
+# AWS reserves 5 IPs per subnet, and the attachment uses 1 ENI per AZ, so a
+# /28 (16 - 5 = 11 usable) is plenty.
+#
+# Why a separate tier? It keeps on-prem routing decisions out of workload
+# RTs and lets you NACL the attachment surface tightly. Common gotcha if
+# you skip this: every workload subnet ends up with TGW routes mixed in
+# with the NAT default, and debugging asymmetric flows gets painful.
 resource "aws_subnet" "transit" {
   count = local.should_create_vpc && var.create_subnets ? local.transit_subnet_count : 0
 
   vpc_id            = aws_vpc.this[0].id
-  cidr_block        = var.transit_subnets[count.index]
+  cidr_block        = local.effective_transit_subnets[count.index]
   availability_zone = local.azs[count.index]
 
   tags = merge(local.base_tags, var.transit_subnet_tags, {

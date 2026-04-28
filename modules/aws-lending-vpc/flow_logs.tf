@@ -1,7 +1,11 @@
-# Flow logs are on by choice: they cost money and most of the value shows up
-# when someone's actually analyzing them. The caller owns the destination
-# (CW log group / S3 bucket / Firehose stream) and the publishing IAM role,
-# so the module doesn't create either.
+# Flow logs are opt-in. The destination (CW Logs / S3 / Firehose) and IAM
+# role are owned by the caller — building log groups inside this module
+# would make the module destroy a foot-gun, and the IAM role typically
+# already exists in the landing zone.
+#
+# Cost note: ALL traffic at 60s aggregation in a busy VPC adds up. For
+# regulated environments use S3 + Athena. For light visibility, switch to
+# 600s aggregation (default) and ACCEPT-only.
 resource "aws_flow_log" "this" {
   count = var.enable_flow_logs ? 1 : 0
 

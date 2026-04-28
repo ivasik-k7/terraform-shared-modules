@@ -1,18 +1,23 @@
-# Route-table layout:
-#   public    one shared route table (default route: IGW)
-#   private   one per AZ              (default route: NAT in same AZ)
-#   database  one shared route table (no default route; internal only)
-#   intra     one shared route table (no default route; internal only)
-#   transit   one shared route table (no default route; TGW-attachment ENIs only)
+# Route-table layout, so it's obvious in one place:
 #
-# Per-AZ private RTs are what let you drop a NAT in each AZ and avoid the
-# cross-AZ data charge on the return path.
+#   public    1 shared RT, default route -> IGW
+#   private   1 RT per AZ, default route -> NAT in same AZ (skippable)
+#   database  1 shared RT, NO default route
+#   intra     1 shared RT, NO default route
+#   transit   1 shared RT, NO default route (TGW propagation lives at the
+#             TGW route table, not on this VPC RT)
+#
+# Per-AZ private RTs are deliberate. Pointing all private subnets at one NAT
+# means traffic from AZ-b/c crosses the AZ boundary to reach NAT in AZ-a,
+# and AWS bills that data transfer at both ends. With per-AZ RTs and per-AZ
+# NATs, traffic stays in-AZ and the bill stays sane.
 
+# =============================================================================
 # Public
-
+# =============================================================================
 resource "aws_route_table" "public" {
   count = (var.create_public_route_table && (
-    (local.should_create_vpc && length(aws_subnet.public) > 0) ||
+    (local.should_create_vpc && local.public_subnet_count > 0) ||
     (local.using_existing_vpc && length(var.public_subnet_ids) > 0)
   )) ? 1 : 0
 
@@ -45,8 +50,12 @@ resource "aws_route_table_association" "public_existing" {
   route_table_id = aws_route_table.public[0].id
 }
 
-# Private: one route table per AZ. Indexed by AZ so the module can wire the
-# NAT in the same AZ (avoids cross-AZ NAT charges on the return path).
+# =============================================================================
+# Private
+# =============================================================================
+# One RT per AZ. Indexed by AZ position so [i] -> RT for AZ i; the NAT
+# default route lookup later modulos against nat_gateway_count, which makes
+# single_nat_gateway = true collapse all private RTs onto the one NAT.
 
 resource "aws_route_table" "private" {
   count = var.create_private_route_tables ? (
@@ -57,17 +66,20 @@ resource "aws_route_table" "private" {
   vpc_id = local.vpc_id
 
   tags = merge(local.base_tags, var.private_route_table_tags, {
-    Name = "${var.name}-private-rt-${count.index}"
+    Name = "${var.name}-private-rt-${count.index < length(local.azs) ? local.azs[count.index] : count.index}"
+    AZ   = count.index < length(local.azs) ? local.azs[count.index] : ""
   })
 }
 
+# 0.0.0.0/0 -> NAT default route. Skippable for "central egress" topologies
+# where a TGW route handles outbound and you want a clean RT.
 resource "aws_route" "private_nat_gateway" {
-  count = var.create_private_route_tables && var.enable_nat_gateway && local.nat_gateway_count > 0 ? length(aws_route_table.private) : 0
+  count = var.create_private_route_tables && var.enable_nat_gateway && local.nat_gateway_count > 0 && !var.skip_private_nat_default_route ? length(aws_route_table.private) : 0
 
   route_table_id         = aws_route_table.private[count.index].id
   destination_cidr_block = var.nat_gateway_destination_cidr_block
-  # When single_nat_gateway = true the modulo collapses every private RT onto
-  # the one NAT. Otherwise it lines up per-AZ.
+  # modulo so single_nat_gateway = true sends every RT to the one NAT, while
+  # one-per-AZ sends each RT to its same-AZ NAT.
   nat_gateway_id = aws_nat_gateway.this[count.index % local.nat_gateway_count].id
 }
 
@@ -85,9 +97,9 @@ resource "aws_route_table_association" "private_existing" {
   route_table_id = aws_route_table.private[count.index].id
 }
 
-# Database: one shared RT. No default route; add routes via var.private_routes
-# or the caller's own resources.
-
+# =============================================================================
+# Database
+# =============================================================================
 resource "aws_route_table" "database" {
   count = var.create_database_route_table && (
     (local.should_create_vpc && length(aws_subnet.database) > 0) ||
@@ -115,8 +127,9 @@ resource "aws_route_table_association" "database_existing" {
   route_table_id = aws_route_table.database[0].id
 }
 
+# =============================================================================
 # Intra
-
+# =============================================================================
 resource "aws_route_table" "intra" {
   count = var.create_intra_route_table && (
     (local.should_create_vpc && length(aws_subnet.intra) > 0) ||
@@ -144,9 +157,12 @@ resource "aws_route_table_association" "intra_existing" {
   route_table_id = aws_route_table.intra[0].id
 }
 
-# Transit: host-only subnets for TGW/Cloud WAN ENIs. No default route added;
-# traffic destined for on-prem gets routed at the TGW route table level, not
-# here.
+# =============================================================================
+# Transit
+# =============================================================================
+# Stays empty by design. If you need to push something at the TGW from the
+# transit subnets themselves (rare — usually hosts only the attachment ENI),
+# add it via var.private_routes / var.public_routes targeting this RT id.
 
 resource "aws_route_table" "transit" {
   count = var.create_transit_route_table && (
@@ -175,9 +191,11 @@ resource "aws_route_table_association" "transit_existing" {
   route_table_id = aws_route_table.transit[0].id
 }
 
-# Additional routes passed in by the caller. Kept generic so the caller can
-# target any route table they own (not just the ones this module creates).
-
+# =============================================================================
+# Caller-supplied extra routes
+# =============================================================================
+# Generic on purpose: caller picks any route table they own (whether the
+# module created it or not) and any single target field.
 resource "aws_route" "public_additional" {
   for_each = { for i, r in var.public_routes : i => r }
 

@@ -1,7 +1,14 @@
-# The default NACL on every VPC allows all traffic. If you want to lock it
-# down (common in regulated environments), opt in via manage_default_network_acl
-# and supply ingress/egress rule sets. Subnet-specific NACLs are out of scope
-# here; use a separate aws_network_acl resource for those.
+# The default NACL on every VPC allows all traffic in and out. To lock it
+# down (regulated environments often require this) opt in via
+# manage_default_network_acl and pass your rule sets.
+#
+# DESTRUCTIVE: this resource REPLACES the default rules. If you set both
+# rule lists empty, every subnet associated with the default NACL becomes
+# unreachable. The check{} block doesn't catch this on purpose — sometimes
+# "deny everything" is exactly what you want, just be intentional.
+#
+# Subnet-specific NACLs are out of scope for this module; use a separate
+# aws_network_acl resource if you need them.
 resource "aws_default_network_acl" "this" {
   count = var.manage_default_network_acl ? 1 : 0
 
