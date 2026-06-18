@@ -16,10 +16,8 @@ locals {
       recovery_window_in_days = coalesce(cfg.recovery_window_in_days, var.default_recovery_window_in_days)
 
       tags = merge(
-        {
-          "managed-by"  = "terraform"
-          "environment" = var.environment
-        },
+        { "managed-by" = "terraform" },
+        var.environment != "" ? { "environment" = var.environment } : {},
         var.default_tags,
         cfg.tags,
       )

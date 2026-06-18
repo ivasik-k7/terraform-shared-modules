@@ -1,6 +1,3 @@
-data "aws_caller_identity" "current" {}
-data "aws_partition" "current" {}
-
 resource "aws_secretsmanager_secret" "managed" {
   for_each = local.managed
 
@@ -129,23 +126,23 @@ data "aws_iam_policy_document" "this" {
   }
 
   dynamic "statement" {
-    for_each = try(each.value.policy.additional_statements, [])
+    for_each = each.value.policy != null ? each.value.policy.additional_statements : []
     content {
-      sid           = try(statement.value.sid, null)
-      effect        = try(statement.value.effect, "Allow")
-      actions       = try(statement.value.actions, null)
-      not_actions   = try(statement.value.not_actions, null)
-      resources     = try(statement.value.resources, ["*"])
-      not_resources = try(statement.value.not_resources, null)
+      sid           = statement.value.sid
+      effect        = statement.value.effect
+      actions       = statement.value.actions
+      not_actions   = statement.value.not_actions
+      resources     = statement.value.resources
+      not_resources = statement.value.not_resources
       dynamic "principals" {
-        for_each = try(statement.value.principals, [])
+        for_each = statement.value.principals
         content {
           type        = principals.value.type
           identifiers = principals.value.identifiers
         }
       }
       dynamic "condition" {
-        for_each = try(statement.value.conditions, [])
+        for_each = statement.value.conditions
         content {
           test     = condition.value.test
           variable = condition.value.variable

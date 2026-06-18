@@ -63,9 +63,25 @@ variable "secrets" {
     })), [])
 
     policy = optional(object({
-      reader_arns           = optional(list(string), [])
-      manager_arns          = optional(list(string), [])
-      additional_statements = optional(list(any), [])
+      reader_arns  = optional(list(string), [])
+      manager_arns = optional(list(string), [])
+      additional_statements = optional(list(object({
+        sid           = optional(string)
+        effect        = optional(string, "Allow")
+        actions       = optional(list(string))
+        not_actions   = optional(list(string))
+        resources     = optional(list(string), ["*"])
+        not_resources = optional(list(string))
+        principals = optional(list(object({
+          type        = string
+          identifiers = list(string)
+        })), [])
+        conditions = optional(list(object({
+          test     = string
+          variable = string
+          values   = list(string)
+        })), [])
+      })), [])
     }), null)
 
     tags = optional(map(string), {})
