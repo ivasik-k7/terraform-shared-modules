@@ -122,23 +122,23 @@ output "security_group_name" {
 }
 
 output "db_subnet_group_id" {
-  description = "The database subnet group ID"
-  value       = aws_db_subnet_group.main.id
+  description = "The database subnet group ID (null when an existing subnet group is reused)"
+  value       = var.create_db_subnet_group ? aws_db_subnet_group.main[0].id : null
 }
 
 output "db_subnet_group_name" {
-  description = "The database subnet group name"
-  value       = aws_db_subnet_group.main.name
+  description = "The database subnet group name the cluster is attached to"
+  value       = local.db_subnet_group_name
 }
 
 output "db_subnet_group_arn" {
-  description = "ARN of the database subnet group"
-  value       = aws_db_subnet_group.main.arn
+  description = "ARN of the database subnet group (null when an existing subnet group is reused)"
+  value       = var.create_db_subnet_group ? aws_db_subnet_group.main[0].arn : null
 }
 
 output "db_subnet_ids" {
-  description = "List of subnet IDs in the database subnet group"
-  value       = aws_db_subnet_group.main.subnet_ids
+  description = "List of subnet IDs in the database subnet group (empty when an existing subnet group is reused)"
+  value       = var.create_db_subnet_group ? aws_db_subnet_group.main[0].subnet_ids : []
 }
 
 # ============================================================================
@@ -170,13 +170,13 @@ output "db_parameter_group_arn" {
 # ============================================================================
 
 output "enhanced_monitoring_role_arn" {
-  description = "ARN of the IAM role for enhanced monitoring (if created)"
-  value       = var.monitoring_interval > 0 && var.create_monitoring_role ? aws_iam_role.enhanced_monitoring[0].arn : null
+  description = "ARN of the IAM role used for enhanced monitoring (created or provided)"
+  value       = local.monitoring_role_arn
 }
 
 output "enhanced_monitoring_role_name" {
-  description = "Name of the IAM role for enhanced monitoring (if created)"
-  value       = var.monitoring_interval > 0 && var.create_monitoring_role ? aws_iam_role.enhanced_monitoring[0].name : null
+  description = "Name of the IAM role for enhanced monitoring (only when created by this module)"
+  value       = local.create_monitoring_role ? aws_iam_role.enhanced_monitoring[0].name : null
 }
 
 output "cloudwatch_log_groups" {
@@ -206,11 +206,6 @@ output "preferred_backup_window" {
 output "preferred_maintenance_window" {
   description = "The preferred maintenance window"
   value       = aws_rds_cluster.main.preferred_maintenance_window
-}
-
-output "backup_encryption_key_id" {
-  description = "The KMS key ARN used for backup encryption"
-  value       = var.backup_encryption_key_id
 }
 
 # ============================================================================
@@ -260,6 +255,44 @@ output "kms_key_id" {
 output "iam_database_authentication_enabled" {
   description = "Whether IAM database authentication is enabled"
   value       = aws_rds_cluster.main.iam_database_authentication_enabled
+}
+
+# ============================================================================
+# MANAGED MASTER USER SECRET
+# ============================================================================
+
+output "master_user_secret_arn" {
+  description = "ARN of the RDS-managed master user secret in Secrets Manager (null unless manage_master_user_password is true)"
+  value       = var.manage_master_user_password ? one(aws_rds_cluster.main.master_user_secret[*].secret_arn) : null
+}
+
+output "master_user_secret_kms_key_id" {
+  description = "KMS key ID used to encrypt the RDS-managed master user secret"
+  value       = var.manage_master_user_password ? one(aws_rds_cluster.main.master_user_secret[*].kms_key_id) : null
+}
+
+# ============================================================================
+# CUSTOM ENDPOINTS / ROLE ASSOCIATIONS / ACTIVITY STREAM
+# ============================================================================
+
+output "custom_endpoints" {
+  description = "Map of custom cluster endpoint identifiers to their DNS addresses"
+  value       = { for k, v in aws_rds_cluster_endpoint.custom : k => v.endpoint }
+}
+
+output "custom_endpoint_arns" {
+  description = "Map of custom cluster endpoint identifiers to their ARNs"
+  value       = { for k, v in aws_rds_cluster_endpoint.custom : k => v.arn }
+}
+
+output "iam_role_associations" {
+  description = "Map of associated IAM role labels to their role ARNs"
+  value       = { for k, v in aws_rds_cluster_role_association.this : k => v.role_arn }
+}
+
+output "activity_stream_kinesis_stream_name" {
+  description = "Name of the Kinesis stream backing the database activity stream (null when disabled)"
+  value       = var.enable_activity_stream ? aws_rds_cluster_activity_stream.this[0].kinesis_stream_name : null
 }
 
 # ============================================================================

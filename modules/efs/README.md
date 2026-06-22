@@ -6,12 +6,14 @@ A Terraform module for provisioning AWS Elastic File System (EFS) with mount tar
 
 - Creates an EFS file system with configurable encryption, performance mode, and throughput settings
 - Provisions mount targets across specified subnets for NFS access
-- Optionally creates a dedicated security group with configurable access rules
+- Optionally creates a dedicated security group with IPv4 **and IPv6** access rules
 - Supports EFS access points for application-specific mounting
 - Handles automatic backups via backup policies
 - Supports file system replication to other regions or zones
 - Manages lifecycle policies for automatic data tiering (Standard → IA → Archive)
 - Supports both one-zone and multi-zone configurations
+- Can attach a **TLS-enforcement file system policy** (`enforce_in_transit_encryption`)
+- Optionally creates **CloudWatch alarms** (burst credit balance, percent IO limit)
 
 ## Basic Usage
 
@@ -105,11 +107,22 @@ module "efs" {
 
 ### Required
 
-| Name                 | Type         | Description                                           |
-| -------------------- | ------------ | ----------------------------------------------------- |
-| `name`               | string       | Name of the EFS file system                           |
-| `subnet_ids`         | list(string) | List of subnet IDs for mount targets                  |
-| `security_group_ids` | list(string) | List of security group IDs to attach to mount targets |
+| Name   | Type   | Description                 |
+| ------ | ------ | --------------------------- |
+| `name` | string | Name of the EFS file system |
+
+> **Note:** `subnet_ids` and `security_group_ids` were previously required and
+> are now **optional** (both default to `[]`). Existing callers are unaffected.
+> Leave `subnet_ids` empty to create a file system with no mount targets (e.g. a
+> replication destination). Provide mount-target security groups either via
+> `security_group_ids` or by setting `create_security_group = true`.
+
+### Networking
+
+| Name                 | Type         | Default | Description                                                                       |
+| -------------------- | ------------ | ------- | --------------------------------------------------------------------------------- |
+| `subnet_ids`         | list(string) | `[]`    | Subnets to place mount targets in (one mount target per subnet)                   |
+| `security_group_ids` | list(string) | `[]`    | Existing security groups to attach to mount targets (in addition to a created one) |
 
 ### Encryption
 
@@ -148,8 +161,27 @@ module "efs" {
 | ---------------------------- | ------------ | ------- | ----------------------------------------------------------------------- |
 | `create_security_group`      | bool         | `false` | Create a dedicated EFS security group                                   |
 | `vpc_id`                     | string       | `null`  | VPC ID for security group (required if `create_security_group` is true) |
-| `allowed_cidr_blocks`        | list(string) | `[]`    | CIDR blocks allowed NFS access (port 2049)                              |
+| `allowed_cidr_blocks`        | list(string) | `[]`    | IPv4 CIDR blocks allowed NFS access (port 2049)                         |
+| `allowed_ipv6_cidr_blocks`   | list(string) | `[]`    | IPv6 CIDR blocks allowed NFS access (port 2049)                         |
 | `allowed_security_group_ids` | list(string) | `[]`    | Security group IDs allowed NFS access                                   |
+
+### In-Transit Encryption Policy
+
+| Name                            | Type | Default | Description                                                                                          |
+| ------------------------------- | ---- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `enforce_in_transit_encryption` | bool | `false` | Attach a file system policy denying any non-TLS access. Mutually exclusive with `file_system_policy`. |
+
+### CloudWatch Alarms
+
+| Name                                   | Type         | Default        | Description                                                                  |
+| -------------------------------------- | ------------ | -------------- | ---------------------------------------------------------------------------- |
+| `create_cloudwatch_alarms`             | bool         | `false`        | Create EFS CloudWatch alarms                                                 |
+| `alarm_burst_credit_balance_threshold` | number       | `206158430208` | Alarm when BurstCreditBalance (bytes) drops below this (bursting mode only)  |
+| `alarm_percent_io_limit_threshold`     | number       | `95`           | Alarm when PercentIOLimit exceeds this percent (generalPurpose mode only)    |
+| `alarm_evaluation_periods`             | number       | `3`            | Evaluation periods for the alarms                                            |
+| `alarm_period`                         | number       | `300`          | Period (seconds) for each alarm statistic                                    |
+| `alarm_actions`                        | list(string) | `[]`           | ARNs notified on ALARM (e.g. SNS topics)                                     |
+| `ok_actions`                           | list(string) | `[]`           | ARNs notified on OK                                                          |
 
 ### Backup and Policies
 
@@ -217,6 +249,9 @@ Replication object structure:
 | `efs_id`                                               | The ID of the EFS file system                           |
 | `efs_arn`                                              | The ARN of the EFS file system                          |
 | `efs_dns_name`                                         | The DNS name for mounting via NFS                       |
+| `file_system_id`                                       | Alias of `efs_id`                                       |
+| `file_system_arn`                                      | Alias of `efs_arn`                                      |
+| `file_system_dns_name`                                 | Alias of `efs_dns_name`                                 |
 | `efs_size_in_bytes`                                    | Current metered size of the file system                 |
 | `efs_number_of_mount_targets`                          | Number of active mount targets                          |
 | `mount_target_ids`                                     | Map of subnet IDs to mount target IDs                   |
@@ -229,6 +264,10 @@ Replication object structure:
 | `security_group_id`                                    | The ID of the auto-created security group (if created)  |
 | `security_group_arn`                                   | The ARN of the auto-created security group (if created) |
 | `replication_configuration_destination_file_system_id` | The file system ID of the replica (if replicated)       |
+| `replication_configuration_destination_region`         | The region of the replica file system (if replicated)   |
+| `file_system_policy`                                   | The effective file system policy JSON applied (or null) |
+| `backup_policy_enabled`                                | Whether a backup policy is managed by this module       |
+| `cloudwatch_alarm_names`                               | Names of the CloudWatch alarms created                  |
 
 ## Common Patterns
 
@@ -295,6 +334,38 @@ module "efs_primary" {
 }
 ```
 
+### Enforce In-Transit Encryption (TLS)
+
+```hcl
+module "efs" {
+  source = "./efs"
+
+  name       = "my-app"
+  subnet_ids = ["subnet-12345", "subnet-67890"]
+
+  create_security_group = true
+  vpc_id                = "vpc-12345"
+  allowed_cidr_blocks   = ["10.0.0.0/16"]
+
+  # Deny any mount/read/write that is not over TLS.
+  enforce_in_transit_encryption = true
+}
+```
+
+### Operational Alarms
+
+```hcl
+module "efs" {
+  source = "./efs"
+
+  name       = "my-app"
+  subnet_ids = ["subnet-12345", "subnet-67890"]
+
+  create_cloudwatch_alarms = true
+  alarm_actions            = [aws_sns_topic.alerts.arn]
+}
+```
+
 ### Application-Specific Access Points
 
 ```hcl
@@ -340,6 +411,19 @@ module "efs" {
 
 ## Important Notes
 
+### Upgrade Notes
+
+The security group rules were migrated from the legacy `aws_security_group_rule`
+resource to the modern `aws_vpc_security_group_ingress_rule` /
+`aws_vpc_security_group_egress_rule` resources (consistent with the rest of the
+repo, and individually taggable). Because Terraform cannot `moved`-migrate
+across resource *types*, the **first apply after upgrading recreates the EFS
+ingress/egress rules** (the security group itself and the file system are
+untouched). Each allowed CIDR/security group now produces its own rule. To
+avoid any momentary gap in NFS reachability, apply during a maintenance window
+or pre-create equivalent rules. Callers that pass their own `security_group_ids`
+(i.e. `create_security_group = false`) are unaffected.
+
 ### Security Group Handling
 
 When `create_security_group = true`:
@@ -351,8 +435,10 @@ When `create_security_group = true`:
 
 Without `create_security_group`:
 
-- You must provide `security_group_ids` - mount targets require at least one security group
+- Any mount target needs at least one security group, so when `subnet_ids` is
+  non-empty you must provide `security_group_ids` (or set `create_security_group = true`)
 - Ensure your security groups allow inbound NFS traffic on port 2049
+- IPv6 clients: add their ranges via `allowed_ipv6_cidr_blocks`
 
 ### Performance Considerations
 

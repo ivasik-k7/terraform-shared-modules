@@ -41,6 +41,25 @@ resource "aws_vpc_security_group_ingress_rule" "from_cidr" {
 }
 
 # ============================================================================
+# INGRESS RULES - IPv6 CIDR BLOCKS
+# ============================================================================
+
+resource "aws_vpc_security_group_ingress_rule" "from_ipv6_cidr" {
+  count = var.create_security_group && length(var.allowed_ipv6_cidr_blocks) > 0 ? length(var.allowed_ipv6_cidr_blocks) : 0
+
+  security_group_id = aws_security_group.aurora[0].id
+  from_port         = local.port
+  to_port           = local.port
+  ip_protocol       = "tcp"
+  cidr_ipv6         = var.allowed_ipv6_cidr_blocks[count.index]
+  description       = "Allow database access from ${var.allowed_ipv6_cidr_blocks[count.index]}"
+
+  tags = {
+    "Name" = "${var.cluster_identifier}-from-ipv6-cidr-${count.index}"
+  }
+}
+
+# ============================================================================
 # INGRESS RULES - SECURITY GROUPS
 # ============================================================================
 

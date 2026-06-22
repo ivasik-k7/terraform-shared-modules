@@ -38,22 +38,29 @@ variable "engine_version" {
 }
 
 variable "vpc_id" {
-  description = "VPC ID where the Aurora cluster will be created"
+  description = "VPC ID where the Aurora cluster will be created. Required only when create_security_group is true."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^vpc-", var.vpc_id))
+    condition     = var.vpc_id == null || can(regex("^vpc-", var.vpc_id))
     error_message = "VPC ID must start with 'vpc-'."
+  }
+
+  validation {
+    condition     = !var.create_security_group || var.vpc_id != null
+    error_message = "vpc_id is required when create_security_group is true."
   }
 }
 
 variable "subnet_ids" {
-  description = "A list of VPC subnet IDs (minimum 2 for HA)"
+  description = "A list of VPC subnet IDs (minimum 2 for HA). Required only when create_db_subnet_group is true."
   type        = list(string)
+  default     = []
 
   validation {
-    condition     = length(var.subnet_ids) >= 2
-    error_message = "At least 2 subnet IDs are required for Aurora high availability."
+    condition     = !var.create_db_subnet_group || length(var.subnet_ids) >= 2
+    error_message = "At least 2 subnet IDs are required for Aurora high availability when create_db_subnet_group is true."
   }
 }
 
@@ -73,23 +80,33 @@ variable "engine_mode" {
 }
 
 variable "serverless_scaling_configuration" {
-  description = "Configuration for Aurora Serverless v2 scaling. Required when engine_mode = 'serverless'"
+  description = "Aurora Serverless v2 scaling configuration. Provide this (with db.serverless instance classes) to enable Serverless v2. min_capacity must be >= 0.5 and max_capacity >= min_capacity."
   type = object({
     min_capacity             = number
     max_capacity             = number
-    auto_pause               = optional(bool, false)
     seconds_until_auto_pause = optional(number, 300)
   })
   default = null
 
+  # Capacity bounds are enforced whenever a configuration is supplied,
+  # regardless of engine_mode (Serverless v2 runs on a provisioned cluster).
+  # min_capacity may be 0 (scale-to-zero / auto-pause) or >= 0.5 ACUs.
   validation {
     condition = (
-      var.engine_mode != "serverless" ||
-      (var.serverless_scaling_configuration != null &&
-        var.serverless_scaling_configuration.min_capacity >= 0.5 &&
-      var.serverless_scaling_configuration.max_capacity >= var.serverless_scaling_configuration.min_capacity)
+      var.serverless_scaling_configuration == null ||
+      (
+        (var.serverless_scaling_configuration.min_capacity == 0 || var.serverless_scaling_configuration.min_capacity >= 0.5) &&
+        var.serverless_scaling_configuration.max_capacity >= 0.5 &&
+        var.serverless_scaling_configuration.max_capacity >= var.serverless_scaling_configuration.min_capacity
+      )
     )
-    error_message = "Serverless scaling configuration is required when engine_mode is 'serverless'. Min capacity must be >= 0.5, max >= min."
+    error_message = "Serverless v2 min_capacity must be 0 (scale-to-zero) or >= 0.5, and max_capacity must be >= 0.5 and >= min_capacity."
+  }
+
+  # The legacy engine_mode = 'serverless' (Serverless v1) still requires a config.
+  validation {
+    condition     = var.engine_mode != "serverless" || var.serverless_scaling_configuration != null
+    error_message = "A serverless_scaling_configuration is required when engine_mode is 'serverless'."
   }
 }
 
@@ -108,14 +125,9 @@ variable "backtrack_window" {
 }
 
 variable "enable_http_endpoint" {
-  description = "Enable HTTP endpoint (Data API) for Aurora Serverless"
+  description = "Enable the RDS Data API (HTTP endpoint). Supported on Aurora Serverless v1 (engine_mode 'serverless') and, via the newer RDS Data API, on Serverless v2 and provisioned Aurora. Engine/version/region availability is enforced by AWS."
   type        = bool
   default     = false
-
-  validation {
-    condition     = !var.enable_http_endpoint || var.engine_mode == "serverless"
-    error_message = "HTTP endpoint (Data API) is only available for serverless engine mode."
-  }
 }
 
 # ============================================================================
@@ -187,13 +199,13 @@ variable "iops" {
 }
 
 variable "storage_type" {
-  description = "Specifies the storage type. Only 'gp3' is supported for Aurora PostgreSQL"
+  description = "Aurora cluster storage type. Use 'aurora-iopt1' for Aurora I/O-Optimized, or leave null for standard Aurora storage. 'gp3' remains accepted for backward compatibility."
   type        = string
   default     = null
 
   validation {
-    condition     = var.storage_type == null || (var.engine == "aurora-postgresql" && var.storage_type == "gp3")
-    error_message = "Storage type can only be 'gp3' and only for aurora-postgresql engine."
+    condition     = var.storage_type == null || contains(["aurora", "aurora-iopt1", "gp3"], var.storage_type)
+    error_message = "Storage type must be one of: 'aurora', 'aurora-iopt1', or 'gp3'."
   }
 }
 
@@ -355,7 +367,13 @@ variable "vpc_security_group_ids" {
 }
 
 variable "allowed_cidr_blocks" {
-  description = "CIDR blocks allowed to access Aurora"
+  description = "IPv4 CIDR blocks allowed to access Aurora"
+  type        = list(string)
+  default     = []
+}
+
+variable "allowed_ipv6_cidr_blocks" {
+  description = "IPv6 CIDR blocks allowed to access Aurora"
   type        = list(string)
   default     = []
 }
@@ -385,12 +403,6 @@ variable "backup_retention_period" {
     condition     = var.backup_retention_period >= 1 && var.backup_retention_period <= 35
     error_message = "Backup retention period must be between 1 and 35 days."
   }
-}
-
-variable "backup_encryption_key_id" {
-  description = "The KMS key ARN for encrypting backups"
-  type        = string
-  default     = null
 }
 
 variable "enable_automated_backup" {
@@ -475,9 +487,21 @@ variable "monitoring_interval" {
 }
 
 variable "create_monitoring_role" {
-  description = "Create IAM role for enhanced monitoring"
+  description = "Create IAM role for enhanced monitoring. Ignored when monitoring_role_arn is set."
   type        = bool
   default     = true
+}
+
+variable "monitoring_role_arn" {
+  description = "ARN of a pre-existing IAM role for enhanced monitoring. When set, no role is created."
+  type        = string
+  default     = null
+}
+
+variable "performance_insights_kms_key_id" {
+  description = "KMS key ID/ARN used to encrypt Performance Insights data"
+  type        = string
+  default     = null
 }
 
 variable "performance_insights_enabled" {
@@ -627,6 +651,178 @@ variable "security_group_tags" {
   description = "Additional tags for the security group"
   type        = map(string)
   default     = {}
+}
+
+# ============================================================================
+# DB SUBNET GROUP
+# ============================================================================
+
+variable "create_db_subnet_group" {
+  description = "Whether to create a DB subnet group. Set to false to attach the cluster to a pre-existing subnet group named by db_subnet_group_name."
+  type        = bool
+  default     = true
+
+  validation {
+    condition     = var.create_db_subnet_group || var.db_subnet_group_name != null
+    error_message = "db_subnet_group_name must be provided when create_db_subnet_group is false."
+  }
+}
+
+variable "db_subnet_group_name" {
+  description = "Name of the DB subnet group. When create_db_subnet_group is true this overrides the generated name; when false it must reference an existing subnet group."
+  type        = string
+  default     = null
+}
+
+variable "db_subnet_group_description" {
+  description = "Description for the created DB subnet group"
+  type        = string
+  default     = null
+}
+
+# ============================================================================
+# MASTER CREDENTIALS MANAGEMENT (SECRETS MANAGER)
+# ============================================================================
+
+variable "manage_master_user_password" {
+  description = "Let RDS generate and manage the master user password in AWS Secrets Manager. Mutually exclusive with master_password."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.manage_master_user_password || var.master_password == null
+    error_message = "master_password must be null when manage_master_user_password is true."
+  }
+}
+
+variable "master_user_secret_kms_key_id" {
+  description = "KMS key ID/ARN to encrypt the RDS-managed master user secret. Defaults to the AWS-managed aws/secretsmanager key when null."
+  type        = string
+  default     = null
+}
+
+# ============================================================================
+# SNAPSHOT / RESTORE
+# ============================================================================
+
+variable "snapshot_identifier" {
+  description = "Snapshot or cluster snapshot ARN to restore the cluster from on creation"
+  type        = string
+  default     = null
+}
+
+variable "final_snapshot_identifier" {
+  description = "Name of the final snapshot taken on deletion. Defaults to '<cluster_identifier>-final-snapshot' when skip_final_snapshot is false."
+  type        = string
+  default     = null
+}
+
+# ============================================================================
+# OPERATIONAL TOGGLES
+# ============================================================================
+
+variable "apply_immediately" {
+  description = "Apply changes immediately instead of during the next maintenance window"
+  type        = bool
+  default     = false
+}
+
+variable "allow_major_version_upgrade" {
+  description = "Allow major engine version upgrades when changing engine_version"
+  type        = bool
+  default     = false
+}
+
+variable "enable_local_write_forwarding" {
+  description = "Enable local write forwarding so reader instances forward writes to the writer (Aurora MySQL and PostgreSQL)"
+  type        = bool
+  default     = false
+}
+
+variable "network_type" {
+  description = "Network type of the cluster: 'IPV4' or 'DUAL' (dual-stack)"
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.network_type == null || contains(["IPV4", "DUAL"], var.network_type)
+    error_message = "Network type must be either 'IPV4' or 'DUAL'."
+  }
+}
+
+# ============================================================================
+# CUSTOM CLUSTER ENDPOINTS
+# ============================================================================
+
+variable "cluster_endpoints" {
+  description = "Map of additional custom Aurora cluster endpoints (e.g. dedicated analytics readers). Key becomes the endpoint identifier suffix. Use either static_members or excluded_members, not both. Members are full instance identifiers (e.g. '<cluster_identifier>-<instance_key>')."
+  type = map(object({
+    type             = string
+    static_members   = optional(list(string), [])
+    excluded_members = optional(list(string), [])
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for k, v in var.cluster_endpoints : contains(["READER", "ANY"], v.type)])
+    error_message = "Custom endpoint type must be 'READER' or 'ANY'."
+  }
+
+  validation {
+    condition     = alltrue([for k, v in var.cluster_endpoints : !(length(v.static_members) > 0 && length(v.excluded_members) > 0)])
+    error_message = "A custom endpoint may set either static_members or excluded_members, not both."
+  }
+}
+
+# ============================================================================
+# IAM ROLE ASSOCIATIONS (S3 IMPORT/EXPORT, ETC.)
+# ============================================================================
+
+variable "iam_role_associations" {
+  description = "Map of IAM roles to associate with the cluster for Aurora features such as S3 import/export. Key is a free-form label; feature_name is the Aurora feature (e.g. 's3Import', 's3Export')."
+  type = map(object({
+    role_arn     = string
+    feature_name = string
+  }))
+  default = {}
+}
+
+# ============================================================================
+# DATABASE ACTIVITY STREAM
+# ============================================================================
+
+variable "enable_activity_stream" {
+  description = "Enable a Database Activity Stream for the cluster (provisioned Aurora only)"
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.enable_activity_stream || var.activity_stream_kms_key_id != null
+    error_message = "activity_stream_kms_key_id is required when enable_activity_stream is true."
+  }
+}
+
+variable "activity_stream_mode" {
+  description = "Activity stream mode: 'async' (lower latency, best effort) or 'sync' (guaranteed delivery)"
+  type        = string
+  default     = "async"
+
+  validation {
+    condition     = contains(["async", "sync"], var.activity_stream_mode)
+    error_message = "Activity stream mode must be either 'async' or 'sync'."
+  }
+}
+
+variable "activity_stream_kms_key_id" {
+  description = "KMS key ID/ARN used to encrypt the activity stream. Required when enable_activity_stream is true."
+  type        = string
+  default     = null
+}
+
+variable "activity_stream_audit_fields_included" {
+  description = "Whether engine-native audit fields are included in the activity stream"
+  type        = bool
+  default     = false
 }
 
 # ============================================================================

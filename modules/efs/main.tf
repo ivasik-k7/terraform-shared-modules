@@ -4,6 +4,48 @@ locals {
     var.create_security_group ? [aws_security_group.efs[0].id] : [],
     var.security_group_ids
   )
+
+  # Effective file system policy: an explicit policy wins; otherwise the
+  # generated TLS-enforcement policy is used when requested.
+  file_system_policy = var.file_system_policy != null ? var.file_system_policy : (
+    var.enforce_in_transit_encryption ? data.aws_iam_policy_document.enforce_tls[0].json : null
+  )
+}
+
+# Generated policy that denies any access not using TLS (in-transit encryption).
+data "aws_iam_policy_document" "enforce_tls" {
+  count = var.file_system_policy == null && var.enforce_in_transit_encryption ? 1 : 0
+
+  statement {
+    sid    = "AllowDefaultClientAccess"
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+    actions = [
+      "elasticfilesystem:ClientMount",
+      "elasticfilesystem:ClientWrite",
+      "elasticfilesystem:ClientRootAccess",
+    ]
+    resources = [aws_efs_file_system.this.arn]
+  }
+
+  statement {
+    sid    = "DenyNonTLS"
+    effect = "Deny"
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+    actions   = ["*"]
+    resources = [aws_efs_file_system.this.arn]
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
 }
 
 resource "aws_efs_file_system" "this" {
@@ -72,11 +114,13 @@ resource "aws_efs_backup_policy" "this" {
 }
 
 resource "aws_efs_file_system_policy" "this" {
-  count = var.file_system_policy != null ? 1 : 0
+  # Count keys off plan-known inputs only; the policy body itself may be
+  # computed (the generated TLS policy comes from a data source).
+  count = (var.file_system_policy != null || var.enforce_in_transit_encryption) ? 1 : 0
 
   file_system_id                     = aws_efs_file_system.this.id
   bypass_policy_lockout_safety_check = var.bypass_policy_lockout_safety_check
-  policy                             = var.file_system_policy
+  policy                             = local.file_system_policy
 }
 
 resource "aws_efs_access_point" "this" {

@@ -13,6 +13,22 @@ output "efs_dns_name" {
   value       = aws_efs_file_system.this.dns_name
 }
 
+# Convenience aliases (common naming used by callers/examples).
+output "file_system_id" {
+  description = "The ID of the EFS file system (alias of efs_id)"
+  value       = aws_efs_file_system.this.id
+}
+
+output "file_system_arn" {
+  description = "The ARN of the EFS file system (alias of efs_arn)"
+  value       = aws_efs_file_system.this.arn
+}
+
+output "file_system_dns_name" {
+  description = "The DNS name for the EFS file system (alias of efs_dns_name)"
+  value       = aws_efs_file_system.this.dns_name
+}
+
 output "efs_size_in_bytes" {
   description = "The latest known metered size (in bytes) of data stored in the file system"
   value       = aws_efs_file_system.this.size_in_bytes
@@ -71,4 +87,31 @@ output "security_group_arn" {
 output "replication_configuration_destination_file_system_id" {
   description = "The file system ID of the replica"
   value       = var.replication_configuration != null ? aws_efs_replication_configuration.this[0].destination[0].file_system_id : null
+}
+
+output "replication_configuration_destination_region" {
+  description = "The region of the replica file system"
+  value       = var.replication_configuration != null ? aws_efs_replication_configuration.this[0].destination[0].region : null
+}
+
+# ============================================================================
+# POLICY & MONITORING OUTPUTS
+# ============================================================================
+
+output "file_system_policy" {
+  description = "The effective file system policy JSON applied (null when none)"
+  value       = local.file_system_policy
+}
+
+output "backup_policy_enabled" {
+  description = "Whether an EFS backup policy is managed by this module"
+  value       = var.enable_backup_policy
+}
+
+output "cloudwatch_alarm_names" {
+  description = "Names of the CloudWatch alarms created for the file system"
+  value = compact([
+    length(aws_cloudwatch_metric_alarm.burst_credit_balance) > 0 ? aws_cloudwatch_metric_alarm.burst_credit_balance[0].alarm_name : "",
+    length(aws_cloudwatch_metric_alarm.percent_io_limit) > 0 ? aws_cloudwatch_metric_alarm.percent_io_limit[0].alarm_name : "",
+  ])
 }
