@@ -1,4 +1,14 @@
 ################################################################################
+# General
+################################################################################
+
+variable "create" {
+  description = "Master switch. When false the module creates nothing (useful for conditional stacks)."
+  type        = bool
+  default     = true
+}
+
+################################################################################
 # Repository Configuration
 ################################################################################
 
@@ -9,6 +19,11 @@ variable "repository_name" {
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9-_/]*$", var.repository_name))
     error_message = "Repository name must start with lowercase letter or number and contain only lowercase letters, numbers, hyphens, underscores, and forward slashes."
+  }
+
+  validation {
+    condition     = length(var.repository_name) >= 2 && length(var.repository_name) <= 256
+    error_message = "Repository name must be between 2 and 256 characters."
   }
 }
 
@@ -71,7 +86,7 @@ variable "enable_lifecycle_policy" {
 }
 
 variable "lifecycle_rules" {
-  description = "Lifecycle policy rules"
+  description = "Lifecycle policy rules. action_type is always \"expire\" (the only ECR action). tag_status: tagged|untagged|any. count_type: imageCountMoreThan|sinceImagePushed."
   type = list(object({
     rule_priority    = number
     description      = string
@@ -84,71 +99,138 @@ variable "lifecycle_rules" {
     action_type      = string
   }))
   default = []
+
+  validation {
+    condition     = alltrue([for r in var.lifecycle_rules : contains(["tagged", "untagged", "any"], r.tag_status)])
+    error_message = "lifecycle_rules[*].tag_status must be one of: tagged, untagged, any."
+  }
+
+  validation {
+    condition     = alltrue([for r in var.lifecycle_rules : contains(["imageCountMoreThan", "sinceImagePushed"], r.count_type)])
+    error_message = "lifecycle_rules[*].count_type must be imageCountMoreThan or sinceImagePushed."
+  }
+
+  validation {
+    condition     = alltrue([for r in var.lifecycle_rules : r.action_type == "expire"])
+    error_message = "lifecycle_rules[*].action_type must be \"expire\" (the only action ECR supports)."
+  }
+
+  validation {
+    condition     = length(distinct([for r in var.lifecycle_rules : r.rule_priority])) == length(var.lifecycle_rules)
+    error_message = "lifecycle_rules[*].rule_priority values must be unique."
+  }
+
+  # ECR requires a "tagged" rule to scope itself with a prefix or pattern list.
+  validation {
+    condition     = alltrue([for r in var.lifecycle_rules : r.tag_status != "tagged" || length(r.tag_prefix_list) > 0 || length(r.tag_pattern_list) > 0])
+    error_message = "A lifecycle rule with tag_status = \"tagged\" must set tag_prefix_list or tag_pattern_list."
+  }
 }
 
 ################################################################################
-# Repository Access Control Configuration
+# Repository Access Control - ONE knob: repository_access
+################################################################################
+#
+# The whole resource-policy story in a single object:
+#
+#   repository_access = {
+#     enabled         = true                 # attach a resource policy at all
+#     account_access  = true                 # secure baseline: own account pull/push,
+#                                             #   NO destructive/admin actions
+#     pull_principals = ["arn:aws:iam::333:root"]          # cross-account pull-only
+#     push_principals = ["arn:aws:iam::222:role/ci"]       # cross-account pull+push
+#     statements      = [ { ...raw escape hatch... } ]     # layered on top
+#   }
+#
+# Sensible everywhere: `repository_access = {}` gives the secure baseline only.
+# Set account_access=false for full manual control; enabled=false for no policy.
+
+variable "repository_access" {
+  description = "Single object that manages the entire repository resource policy: enabled, account_access (secure baseline), pull_principals, push_principals, and a raw statements escape hatch layered on top."
+  type = object({
+    enabled         = optional(bool, true)
+    account_access  = optional(bool, true)
+    pull_principals = optional(list(string), [])
+    push_principals = optional(list(string), [])
+    statements = optional(list(object({
+      sid    = string
+      effect = optional(string, "Allow")
+      principals = optional(object({
+        type        = optional(string, "AWS")
+        identifiers = list(string)
+      }), null)
+      actions   = list(string)
+      resources = optional(list(string), null)
+      conditions = optional(list(object({
+        test     = string
+        variable = string
+        values   = list(string)
+      })), [])
+    })), [])
+  })
+  default = {}
+
+  validation {
+    condition     = alltrue([for s in var.repository_access.statements : contains(["Allow", "Deny"], s.effect)])
+    error_message = "repository_access.statements[*].effect must be \"Allow\" or \"Deny\"."
+  }
+
+  validation {
+    condition     = alltrue([for s in var.repository_access.statements : length(s.actions) > 0])
+    error_message = "repository_access.statements[*].actions must be non-empty."
+  }
+
+  validation {
+    condition     = alltrue([for s in var.repository_access.statements : alltrue([for a in s.actions : a == "*" || can(regex("^ecr:", a))])])
+    error_message = "repository_access.statements[*].actions must be ECR actions (ecr:*) or \"*\"."
+  }
+}
+
+################################################################################
+# DEPRECATED access inputs - still honored (merged into repository_access) for
+# backward compatibility. Prefer repository_access; these will be removed in a
+# future major version.
 ################################################################################
 
 variable "create_repository_policy" {
-  description = "Whether to create and attach a repository policy"
+  description = "DEPRECATED - use repository_access.enabled. Still honored: ANDed with repository_access.enabled."
   type        = bool
   default     = true
 }
 
 variable "repository_policy_statements" {
-  description = "Additional IAM policy statements for the repository policy. Allows fine-grained access control."
+  description = "DEPRECATED - use repository_access.statements. Still honored: concatenated onto repository_access.statements."
   type = list(object({
     sid    = string
-    effect = optional(string, "Allow") # Allow or Deny
+    effect = optional(string, "Allow")
     principals = optional(object({
       type        = optional(string, "AWS")
       identifiers = list(string)
     }), null)
     actions   = list(string)
-    resources = optional(list(string), null) # Defaults to repository ARN
+    resources = optional(list(string), null)
     conditions = optional(list(object({
       test     = string
       variable = string
       values   = list(string)
     })), [])
   }))
-  default = [
-    {
-      sid    = "AllowFullAccessToAccount"
-      effect = "Allow"
-      principals = {
-        type        = "AWS"
-        identifiers = []
-      }
-      actions = [
-        "ecr:GetDownloadUrlForLayer",
-        "ecr:BatchGetImage",
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:PutImage",
-        "ecr:InitiateLayerUpload",
-        "ecr:UploadLayerPart",
-        "ecr:CompleteLayerUpload",
-        "ecr:DescribeRepositories",
-        "ecr:GetRepositoryPolicy",
-        "ecr:ListImages",
-        "ecr:DeleteRepository",
-        "ecr:BatchDeleteImage",
-        "ecr:SetRepositoryPolicy",
-        "ecr:DeleteRepositoryPolicy"
-      ]
-    }
-  ]
+  default = []
+
+  validation {
+    condition     = alltrue([for s in var.repository_policy_statements : contains(["Allow", "Deny"], s.effect)])
+    error_message = "repository_policy_statements[*].effect must be \"Allow\" or \"Deny\"."
+  }
 }
 
 variable "allowed_principals" {
-  description = "AWS principals (roles, users, accounts) that should have pull/push access to the repository. Format: arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME"
+  description = "DEPRECATED - use repository_access.push_principals. Still honored: merged in. Principals with pull/push access."
   type        = list(string)
   default     = []
 }
 
 variable "allowed_pull_principals" {
-  description = "AWS principals (roles, users, accounts) that should have read-only (pull) access to the repository"
+  description = "DEPRECATED - use repository_access.pull_principals. Still honored: merged in. Principals with pull-only access."
   type        = list(string)
   default     = []
 }
@@ -276,13 +358,13 @@ variable "registry_policy_json" {
 ################################################################################
 
 variable "tags" {
-  description = "A map of tags to apply to the repository and all related resources"
+  description = "Tags applied to the repository and all related resources. This is the canonical tag input; it is merged over common_tags (tags wins on conflicts)."
   type        = map(string)
   default     = {}
 }
 
 variable "common_tags" {
-  description = "Common tags to apply alongside the tags variable for consistent resource identification"
+  description = "DEPRECATED - use tags. Kept for backward compatibility; merged underneath tags. Will be removed in a future major version."
   type        = map(string)
   default     = {}
 }
