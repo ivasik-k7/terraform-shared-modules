@@ -56,7 +56,9 @@ variable "execute_command_configuration" {
   default = null
 
   validation {
-    condition     = var.execute_command_configuration == null || contains(["NONE", "DEFAULT", "OVERRIDE"], var.execute_command_configuration.logging)
+    # ternary, not ||: terraform < 1.10 evaluates both operands eagerly, so the
+    # attribute access would run against null and crash the plan
+    condition     = var.execute_command_configuration == null ? true : contains(["NONE", "DEFAULT", "OVERRIDE"], var.execute_command_configuration.logging)
     error_message = "execute_command_configuration.logging must be NONE, DEFAULT, or OVERRIDE."
   }
 }
@@ -549,10 +551,12 @@ variable "services" {
   }
 
   # managed EBS volume must map to a volume declared with configure_at_launch.
+  # (null-gated conditions use ternaries, not ||: terraform < 1.10 evaluates
+  # both operands eagerly, so attribute access on null crashes the plan)
   validation {
     condition = alltrue([
       for k, s in var.services :
-      s.managed_ebs_volume == null || (
+      s.managed_ebs_volume == null ? true : (
         contains(keys(s.volumes), s.managed_ebs_volume.name) &&
         try(s.volumes[s.managed_ebs_volume.name].configure_at_launch, false) == true
       )
@@ -573,7 +577,7 @@ variable "services" {
   validation {
     condition = alltrue([
       for k, s in var.services :
-      s.ephemeral_storage_gib == null || (s.ephemeral_storage_gib >= 21 && s.ephemeral_storage_gib <= 200)
+      s.ephemeral_storage_gib == null ? true : (s.ephemeral_storage_gib >= 21 && s.ephemeral_storage_gib <= 200)
     ])
     error_message = "ephemeral_storage_gib must be between 21 and 200."
   }
@@ -591,7 +595,7 @@ variable "services" {
   }
 
   validation {
-    condition     = alltrue([for k, s in var.services : s.launch_type == null || contains(["FARGATE", "EC2", "EXTERNAL"], s.launch_type)])
+    condition     = alltrue([for k, s in var.services : s.launch_type == null ? true : contains(["FARGATE", "EC2", "EXTERNAL"], s.launch_type)])
     error_message = "services[*].launch_type must be FARGATE, EC2, or EXTERNAL."
   }
 
@@ -611,8 +615,10 @@ variable "services" {
   validation {
     condition = alltrue([
       for k, s in var.services :
-      s.service_connect == null || !coalesce(s.service_connect.enabled, true) ||
-      s.service_connect.namespace != null || var.service_connect_namespace != null
+      s.service_connect == null ? true : (
+        !coalesce(s.service_connect.enabled, true) ||
+        s.service_connect.namespace != null || var.service_connect_namespace != null
+      )
     ])
     error_message = "service_connect requires a namespace: set services[*].service_connect.namespace or the cluster-level service_connect_namespace."
   }
@@ -621,7 +627,7 @@ variable "services" {
   validation {
     condition = alltrue([
       for k, s in var.services :
-      s.autoscaling == null || s.autoscaling.min_capacity <= s.autoscaling.max_capacity
+      s.autoscaling == null ? true : s.autoscaling.min_capacity <= s.autoscaling.max_capacity
     ])
     error_message = "services[*].autoscaling.min_capacity must be <= max_capacity."
   }
@@ -640,7 +646,7 @@ variable "services" {
   validation {
     condition = alltrue([
       for k, s in var.services :
-      s.autoscaling == null || s.autoscaling.alb_request_target == null || s.autoscaling.alb_resource_label != null
+      s.autoscaling == null ? true : (s.autoscaling.alb_request_target == null || s.autoscaling.alb_resource_label != null)
     ])
     error_message = "services[*].autoscaling.alb_resource_label is required when alb_request_target is set."
   }
@@ -696,7 +702,7 @@ variable "services" {
   validation {
     condition = alltrue([
       for k, s in var.services :
-      s.deployment_alarms == null || length(s.deployment_alarms.alarm_names) > 0
+      s.deployment_alarms == null ? true : length(s.deployment_alarms.alarm_names) > 0
     ])
     error_message = "services[*].deployment_alarms.alarm_names must be non-empty."
   }

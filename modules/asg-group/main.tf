@@ -364,7 +364,8 @@ resource "aws_autoscaling_group" "this" {
     # an ASG needs somewhere to place instances - fail fast instead of an
     # opaque apply error.
     precondition {
-      condition     = length(var.subnet_ids) > 0 || (var.availability_zones != null && length(var.availability_zones) > 0)
+      # try(), not &&: terraform < 1.10 evaluates eagerly and length() rejects null
+      condition     = length(var.subnet_ids) > 0 || try(length(var.availability_zones) > 0, false)
       error_message = "Provide subnet_ids (recommended) or availability_zones for the ASG."
     }
   }

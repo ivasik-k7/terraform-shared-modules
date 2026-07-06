@@ -171,7 +171,8 @@ variable "tenancy" {
   default     = null
 
   validation {
-    condition     = var.tenancy == null || contains(["default", "dedicated", "host"], var.tenancy)
+    # ternary, not ||: terraform < 1.10 evaluates eagerly and contains() rejects null
+    condition     = var.tenancy == null ? true : contains(["default", "dedicated", "host"], var.tenancy)
     error_message = "tenancy must be 'default', 'dedicated', or 'host'."
   }
 }
@@ -411,7 +412,9 @@ variable "desired_capacity" {
   default     = null
 
   validation {
-    condition     = var.desired_capacity == null || (var.desired_capacity >= var.min_size && var.desired_capacity <= var.max_size)
+    # ternary, not ||: terraform < 1.10 evaluates both operands eagerly, so the
+    # comparison would run against null and crash the plan
+    condition     = var.desired_capacity == null ? true : (var.desired_capacity >= var.min_size && var.desired_capacity <= var.max_size)
     error_message = "desired_capacity must be between min_size and max_size."
   }
 }
@@ -542,18 +545,20 @@ variable "spot" {
   })
   default = null
 
+  # ternaries, not ||: terraform < 1.10 evaluates both operands eagerly, so the
+  # attribute access would run against null and crash the plan
   validation {
-    condition     = var.spot == null || (var.spot.on_demand_percentage_above_base_capacity >= 0 && var.spot.on_demand_percentage_above_base_capacity <= 100)
+    condition     = var.spot == null ? true : (var.spot.on_demand_percentage_above_base_capacity >= 0 && var.spot.on_demand_percentage_above_base_capacity <= 100)
     error_message = "spot.on_demand_percentage_above_base_capacity must be between 0 and 100."
   }
 
   validation {
-    condition     = var.spot == null || var.spot.spot_instance_pools == null || var.spot.allocation_strategy == "lowest-price"
+    condition     = var.spot == null ? true : (var.spot.spot_instance_pools == null || var.spot.allocation_strategy == "lowest-price")
     error_message = "spot.spot_instance_pools is only valid with allocation_strategy = \"lowest-price\"."
   }
 
   validation {
-    condition     = var.spot == null || var.spot.on_demand_base_capacity <= var.max_size
+    condition     = var.spot == null ? true : var.spot.on_demand_base_capacity <= var.max_size
     error_message = "spot.on_demand_base_capacity must be <= max_size."
   }
 }
