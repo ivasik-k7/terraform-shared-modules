@@ -1,0 +1,182 @@
+# ============================================================================
+# agent-warden · CI
+#
+# The whole pipeline runs OFFLINE - no AWS credentials exist anywhere in it.
+# That is by design: policies are jsonencode()d locals, so they render and
+# lint without an account (see tests/render/), and the test suite runs on a
+# mocked provider. The one thing CI cannot prove - a live assume + apply -
+# stays a deliberate, human-gated step outside this pipeline.
+#
+# Layout assumption: module root == repo root (the standalone
+# terraform-aws-agent-warden layout). Inside a monorepo, `include:` this file
+# from the root .gitlab-ci.yml and add a rules:changes guard.
+#
+# Stages:
+#   verify - fast static gates: formatting, validity, tflint, secrets, lambda syntax
+#   test   - the 30-run terraform test suite on BOTH edges of the supported
+#            terraform range, plus the offline policy render
+#   audit  - parliament IAM lint over the rendered policy documents (catches
+#            malformed operators / unknown prefixes / escalation paths that
+#            terraform itself cannot see)
+# ============================================================================
+
+workflow:
+  name: "agent-warden · $CI_COMMIT_REF_NAME"
+  rules:
+    # MR pipelines, the default branch, and release tags - nothing duplicated
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_COMMIT_TAG
+
+default:
+  interruptible: true
+  retry:
+    max: 1
+    when: runner_system_failure
+
+variables:
+  # supported terraform range: versions.tf says >= 1.9.0, so the suite runs on
+  # the floor AND a current release. Bump TF_STABLE as new versions ship.
+  TF_OLDEST: "1.9.8"
+  TF_STABLE: "1.15.7"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "0"
+  TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.tf-plugin-cache"
+
+stages:
+  - verify
+  - test
+  - audit
+
+# ---------------------------------------------------------------------------
+# shared terraform runner: pinned image, plugin cache per terraform version
+# ---------------------------------------------------------------------------
+.terraform:
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  variables:
+    TF_VERSION: $TF_STABLE
+  cache:
+    key: "tf-plugins-$TF_VERSION"
+    paths:
+      - .tf-plugin-cache
+  before_script:
+    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
+    - terraform version
+
+# ============================================================================
+# verify - fast, independent gates (all start immediately)
+# ============================================================================
+
+fmt:
+  stage: verify
+  extends: .terraform
+  needs: []
+  script:
+    - terraform fmt -check -recursive -diff
+
+validate:
+  stage: verify
+  extends: .terraform
+  needs: []
+  parallel:
+    matrix:
+      - TF_VERSION: ["1.9.8", "1.15.7"]
+  script:
+    - terraform init -backend=false
+    - terraform validate
+
+# ruleset behavior is pinned by .tflint.hcl so local runs and CI agree
+lint:tflint:
+  stage: verify
+  image:
+    name: ghcr.io/terraform-linters/tflint:latest # pin a version once mirrored internally
+    entrypoint: [""]
+  needs: []
+  script:
+    - tflint --init
+    - tflint --recursive
+
+# the lambdas ship as source; prove they at least parse on their runtime version
+lambda:compile:
+  stage: verify
+  image: python:3.12-slim
+  needs: []
+  script:
+    - python -m py_compile lambda/killswitch/index.py lambda/digest/index.py
+
+secrets:gitleaks:
+  stage: verify
+  image:
+    name: zricethezav/gitleaks:latest # pin a v8.x tag once mirrored internally
+    entrypoint: [""]
+  needs: []
+  variables:
+    GIT_DEPTH: "0" # full history - a secret leaked in an old commit still counts
+  script:
+    - gitleaks detect --source . --redact --verbose
+
+# ============================================================================
+# test - the mocked suite on both edges of the supported terraform range
+# ============================================================================
+
+test:
+  stage: test
+  extends: .terraform
+  needs: []
+  parallel:
+    matrix:
+      - TF_VERSION: ["1.9.8", "1.15.7"]
+  script:
+    - terraform init -backend=false
+    # junit output exists from terraform 1.11 - use it where available so
+    # results land in the GitLab test UI, plain runs elsewhere
+    - |
+      if terraform test -help 2>&1 | grep -q "junit"; then
+        terraform test -junit-xml=tf-test-report.xml
+      else
+        terraform test
+      fi
+  artifacts:
+    when: always
+    expire_in: 1 week
+    reports:
+      junit: tf-test-report.xml
+
+# render the four policy documents with create=false - zero AWS calls; the
+# artifact is both the lint input and a human-reviewable record of exactly
+# what this commit would enforce
+policy:render:
+  stage: test
+  extends: .terraform
+  needs: []
+  script:
+    - cd tests/render
+    - terraform init -backend=false
+    - terraform apply -auto-approve
+    - mkdir -p "$CI_PROJECT_DIR/rendered-policies"
+    - terraform output -raw boundary_policy_json     > "$CI_PROJECT_DIR/rendered-policies/boundary.json"
+    - terraform output -raw trust_policy_json        > "$CI_PROJECT_DIR/rendered-policies/trust.json"
+    - terraform output -raw team_grants_policy_json  > "$CI_PROJECT_DIR/rendered-policies/team-grants.json"
+    - terraform output -raw scp_policy_json          > "$CI_PROJECT_DIR/rendered-policies/scp.json"
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - rendered-policies/
+
+# ============================================================================
+# audit - IAM semantics that terraform cannot check
+# ============================================================================
+
+policy:lint:
+  stage: audit
+  image: python:3.12-slim
+  needs: ["policy:render"]
+  script:
+    # parliament still imports pkg_resources (removed in setuptools >= 81)
+    - pip install --quiet 'setuptools<81' parliament
+    - python tests/lint_policies.py
+        rendered-policies/boundary.json
+        rendered-policies/team-grants.json
+        rendered-policies/scp.json

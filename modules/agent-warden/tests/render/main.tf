@@ -6,6 +6,15 @@
 
 terraform {
   required_version = ">= 1.9.0"
+
+  # pinned to the module's own constraint so the fixture can never resolve a
+  # provider the module itself would reject
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.75.0, < 6.0.0"
+    }
+  }
 }
 
 # offline: mock creds + skip flags; nothing ever calls AWS (create = false).
