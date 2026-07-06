@@ -1,0 +1,5 @@
+# local artifacts of the offline render (no real infrastructure in this state)
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
