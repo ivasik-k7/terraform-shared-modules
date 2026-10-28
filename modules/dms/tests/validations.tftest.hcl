@@ -368,3 +368,27 @@ run "task_event_categories_rejects_not_a_dms_task_category" {
 
   expect_failures = [var.task_event_categories]
 }
+
+run "endpoints_secret_arn_rejects_a_partial_arn" {
+  command = plan
+
+  # Secrets Manager appends six random characters; the role policy names the
+  # full ARN, so a partial one is AccessDenied at the connection test.
+  variables {
+    endpoints = {
+      source-db = {
+        role            = "source"
+        engine          = "postgres"
+        server_name     = "src.example.com"
+        port            = 5432
+        database_name   = "app"
+        secret_arn      = "arn:aws:secretsmanager:eu-west-1:111122223333:secret:src"
+        ssl_mode        = "verify-full"
+        certificate_key = "rds-ca"
+      }
+    }
+    tasks = {}
+  }
+
+  expect_failures = [var.endpoints]
+}

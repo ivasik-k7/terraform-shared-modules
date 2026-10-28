@@ -198,6 +198,16 @@ output "proxy_security_group_id" {
   value       = one(aws_security_group.proxy[*].id)
 }
 
+output "iam_database_users_function_name" {
+  description = "The Lambda function that creates the IAM database users in the engine (create_iam_database_users), or null. Its log group is /aws/lambda/<this>."
+  value       = one(aws_lambda_function.iam_database_users[*].function_name)
+}
+
+output "iam_database_users_role_arn" {
+  description = "The execution role of that function, or null: the principal that reads the admin secret through the Data API."
+  value       = one(aws_iam_role.iam_database_users[*].arn)
+}
+
 # ---------------------------------------------------------------------------
 # Contracts
 #
@@ -233,11 +243,12 @@ output "governance" {
   description = "The security, resilience and cost posture of this cluster, as data rather than prose. Assert on it in tests, or diff it in a change review."
   value = !local.create ? null : {
     # Credentials and transport
-    credential_source                   = local.credential_source
-    master_password_rotation            = local.create_rotation_schedule ? coalesce(var.master_password_rotation.schedule_expression, "every ${var.master_password_rotation.automatically_after_days} days") : (local.manage_password ? "rds default (every 7 days)" : "n/a")
-    tls_enforced                        = local.tls_enforced ? "yes" : (var.enforce_tls ? "unknown - brought parameter group" : "no")
-    iam_database_authentication_enabled = var.iam_database_authentication_enabled
-    iam_database_users                  = { for u, c in var.iam_database_users : u => c.connect_via }
+    credential_source                    = local.credential_source
+    master_password_rotation             = local.create_rotation_schedule ? coalesce(var.master_password_rotation.schedule_expression, "every ${var.master_password_rotation.automatically_after_days} days") : (local.manage_password ? "rds default (every 7 days)" : "n/a")
+    tls_enforced                         = local.tls_enforced ? "yes" : (var.enforce_tls ? "unknown - brought parameter group" : "no")
+    iam_database_authentication_enabled  = var.iam_database_authentication_enabled
+    iam_database_users                   = { for u, c in var.iam_database_users : u => c.connect_via }
+    iam_database_users_created_by_module = local.create_iam_db_users
 
     # Audit logging
     audit_logging = !local.audit_enabled ? null : {
@@ -414,8 +425,10 @@ output "kms_key_policy_requirements" {
         condition = { "kms:ViaService" = "secretsmanager.${local.region}.amazonaws.com" }
         why       = "Readers decrypt the master secret through Secrets Manager."
 
-        sid        = "MasterSecretReaders"
-        principals = { services = [], arns = [], roles = ["secret_readers"] }
+        sid = "MasterSecretReaders"
+        # The user-creating function reads the master secret through Data API
+        # unless an admin secret is brought.
+        principals = { services = [], arns = compact([var.iam_database_users_admin_secret.arn == "" ? one(aws_iam_role.iam_database_users[*].arn) : ""]), roles = ["secret_readers"] }
         conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["secretsmanager.${local.region}.amazonaws.com"] }]
         purpose    = "Readers decrypt the master secret through Secrets Manager."
     }]),
@@ -551,6 +564,9 @@ output "iam_database_auth" {
   value = !local.create ? null : {
     cluster_iam_auth_enabled = var.iam_database_authentication_enabled
     proxy_iam_auth           = local.proxy_enabled ? var.proxy.iam_auth : null
+    # Whether the module creates the cluster users in the engine. false: the
+    # engine_sql of each user is the DBA's to run.
+    users_created_by_module = local.create_iam_db_users
     users = {
       for u, x in local.iam_db_users : u => {
         connect_via   = x.connect_via
@@ -561,6 +577,12 @@ output "iam_database_auth" {
         port          = x.port
         token_command = "aws rds generate-db-auth-token --hostname ${coalesce(x.host, "<host>")} --port ${x.port} --region ${local.region} --username ${u}"
         engine_sql    = x.engine_sql
+        # created_by_module: the module ran engine_sql for this user.
+        # engine_status: what the last run found - created, granted,
+        # converted or unchanged - once applied; null before, and for a user
+        # the module does not create.
+        created_by_module = local.create_iam_db_users && x.connect_via == "cluster"
+        engine_status     = try(local.iam_db_users_result[u], null)
       }
     }
     # The five Data API actions on this cluster, and the master secret it reads.
@@ -582,6 +604,7 @@ output "iam_database_auth" {
       )
     })
     notes = [
+      local.create_iam_db_users ? "Cluster users are created in the engine by the module's ${local.iam_db_users_function_name} function through the Data API; proxy users are not." : "The module does not create the engine users: run each user's engine_sql, or set create_iam_database_users = true.",
       "The IAM principal must be in this account; from another account, assume a role here.",
       "Tokens are valid for 15 minutes and must be generated for the endpoint itself: a Route 53 alias or CNAME cannot be used.",
       "aws:SourceIp, aws:SourceVpc, aws:SourceVpce and aws:VpcSourceIp are not supported in rds-db:connect policies.",

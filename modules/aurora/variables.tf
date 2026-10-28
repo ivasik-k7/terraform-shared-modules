@@ -105,7 +105,7 @@ variable "acknowledged_checks" {
         "performance_insights_key_is_the_one_configured", "activity_stream_key_is_the_one_configured", "database_insights_advanced_on_a_global_member",
         "major_upgrade_applies_immediately", "reader_autoscaling_has_a_reader", "mysql_log_exports_have_their_switches",
         "parameter_group_family_matches_the_engine", "iam_auth_failures_are_logged", "iam_auth_has_memory_headroom",
-        "master_user_keeps_its_password", "audit_logs_are_retained",
+        "master_user_keeps_its_password", "audit_logs_are_retained", "iam_users_exist_in_the_engine",
       ], c)
     ])
     error_message = "acknowledged_checks names a check that does not exist. README \"Advisory checks\" lists them."
@@ -610,9 +610,16 @@ variable "iam_database_users" {
 
     The ARN contains the cluster's (or the proxy's) resource ID: a replaced
     or restored cluster, or a global secondary, needs its own policies.
+
+    on_remove: what create_iam_database_users does to the engine user when
+    its key leaves this map, or on destroy. "revoke" (default) takes the token
+    login away and keeps the user and what it owns (PostgreSQL: REVOKE
+    rds_iam; MySQL: ACCOUNT LOCK). "drop" drops the user; PostgreSQL refuses
+    while it owns objects. "keep" leaves it untouched.
   EOT
   type = map(object({
     connect_via = optional(string, "cluster")
+    on_remove   = optional(string, "revoke")
   }))
   default  = {}
   nullable = false
@@ -627,6 +634,11 @@ variable "iam_database_users" {
     condition     = alltrue([for c in values(var.iam_database_users) : contains(["cluster", "proxy"], c.connect_via)])
     error_message = "iam_database_users[*].connect_via must be cluster or proxy."
   }
+
+  validation {
+    condition     = alltrue([for c in values(var.iam_database_users) : contains(["revoke", "drop", "keep"], c.on_remove)])
+    error_message = "iam_database_users[*].on_remove must be revoke, drop or keep."
+  }
 }
 
 variable "create_iam_database_auth_policies" {
@@ -634,6 +646,54 @@ variable "create_iam_database_auth_policies" {
   type        = bool
   default     = false
   nullable    = false
+}
+
+variable "create_iam_database_users" {
+  description = <<-EOT
+    Create the engine users for iam_database_users entries with connect_via =
+    "cluster", so the apply that declares a user also makes it exist in the
+    database (PostgreSQL: CREATE ROLE and GRANT rds_iam; MySQL: CREATE USER
+    WITH AWSAuthenticationPlugin and REQUIRE SSL). A module-owned Lambda
+    function runs the SQL through the RDS Data API: nothing connects to the
+    database from the Terraform runner, no password reaches state, and no VPC
+    access is needed. Needs enable_data_api = true and a secret Data API can
+    log in with: the RDS-managed master secret, or iam_database_users_admin_secret.
+
+    Re-applied on every change to the user list, with each departed user's
+    on_remove honoured, and on destroy. Proxy users are not created: they are
+    password users whose secret the caller owns.
+  EOT
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "iam_database_users_admin_secret" {
+  description = <<-EOT
+    The Secrets Manager secret create_iam_database_users logs in with, in the
+    Data API format ({"username": ..., "password": ...}). Empty arn: the
+    RDS-managed master secret. Bring one for a cluster that cannot have the
+    managed secret (a global database primary), or to use a least-privilege
+    user with CREATEROLE instead of the master. kms_key_arn is the customer
+    key the brought secret is encrypted with, if any; it is granted
+    kms:Decrypt through Secrets Manager.
+  EOT
+  type = object({
+    arn         = optional(string, "")
+    kms_key_arn = optional(string, "")
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = var.iam_database_users_admin_secret.arn == "" ? true : can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+", var.iam_database_users_admin_secret.arn))
+    error_message = "iam_database_users_admin_secret.arn must be empty or a Secrets Manager secret ARN."
+  }
+
+  validation {
+    condition     = var.iam_database_users_admin_secret.kms_key_arn == "" ? true : can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/", var.iam_database_users_admin_secret.kms_key_arn))
+    error_message = "iam_database_users_admin_secret.kms_key_arn must be empty or a KMS key ARN."
+  }
 }
 
 # ---------------------------------------------------------------------------

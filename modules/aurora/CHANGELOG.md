@@ -37,11 +37,17 @@ against the module without AWS.
   replica lag, ACU utilisation, connections, PostgreSQL transaction ID age,
   volume size and global RPO lag; RDS event subscriptions for the cluster and
   its instances.
-- 36 advisory checks, and `acknowledged_checks` to accept one in code.
+- 37 advisory checks, and `acknowledged_checks` to accept one in code.
 - IAM database authentication contract (`iam_database_users`,
   `create_iam_database_auth_policies`, output `iam_database_auth`): exact
   `rds-db:connect` ARNs for cluster and proxy users, policy documents or
   managed policies, token commands, engine SQL and a Data API policy.
+- `create_iam_database_users`: the module creates the cluster IAM users in
+  the engine through a Lambda function and the RDS Data API, on create, on
+  every change to the list (with per-user `on_remove`: `revoke`, `drop`,
+  `keep`) and on destroy. `iam_database_users_admin_secret` brings the login
+  secret. Check `iam_users_exist_in_the_engine` warns when nobody creates them.
+  Adds the `hashicorp/archive` provider.
 - Audit logging preset (`audit_logging`): pgAudit on aurora-postgresql,
   Advanced Auditing on aurora-mysql, with the log export required.
 - Plan-time refusal when Performance Insights or the managed master secret is

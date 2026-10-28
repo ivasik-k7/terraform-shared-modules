@@ -313,6 +313,16 @@ check "master_user_keeps_its_password" {
   }
 }
 
+# The IAM side of a token login is complete after apply; the engine side is
+# not unless the module creates the user. A user nobody created fails every
+# login with "password authentication failed", which looks like a bad token.
+check "iam_users_exist_in_the_engine" {
+  assert {
+    condition     = !local.create ? true : (contains(local.acknowledged, "iam_users_exist_in_the_engine") ? true : (length(local.iam_cluster_users) == 0 ? true : var.create_iam_database_users))
+    error_message = "iam_database_users declares ${join(", ", local.iam_cluster_users)}, and create_iam_database_users is false: the IAM policies will exist, the engine users will not, and every token login fails until somebody runs output.iam_database_auth.users[*].engine_sql. Set create_iam_database_users = true (with enable_data_api), or acknowledge that the DBA runs the SQL. ${local.ack_hint}"
+  }
+}
+
 # Audit records usually have to be kept for a year or more. A shorter
 # retention on the module's log groups deletes them on schedule.
 check "audit_logs_are_retained" {

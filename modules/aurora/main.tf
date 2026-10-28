@@ -330,6 +330,20 @@ resource "aws_rds_cluster" "this" {
     }
 
     precondition {
+      # The function reaches the engine through Data API and nothing else;
+      # without the endpoint every invocation fails after the cluster exists.
+      condition     = var.create_iam_database_users ? var.enable_data_api : true
+      error_message = "create_iam_database_users runs the engine SQL through the RDS Data API, and enable_data_api is false. Set it to true, or leave the users to the DBA with the SQL in output.iam_database_auth."
+    }
+
+    precondition {
+      # Data API logs in with a secret. A plaintext master_password is not one,
+      # and a global member has no managed secret.
+      condition     = var.create_iam_database_users ? (var.iam_database_users_admin_secret.arn != "" ? true : local.manage_password) : true
+      error_message = "create_iam_database_users needs a secret the Data API can log in with: the RDS-managed master secret (manage_master_user_password = true, not available on a global database member) or iam_database_users_admin_secret.arn."
+    }
+
+    precondition {
       condition     = local.audit_enabled ? var.create_cluster_parameter_group : true
       error_message = "audit_logging writes into the module-created cluster parameter group, and create_cluster_parameter_group is false. Set the audit parameters in ${var.cluster_parameter_group_name} yourself, or let the module create the group."
     }

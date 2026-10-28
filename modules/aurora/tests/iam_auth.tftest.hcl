@@ -48,6 +48,12 @@ mock_provider "aws" {
   mock_resource "aws_db_proxy_default_target_group" {
     defaults = { name = "default" }
   }
+  # What the user-creating function returns. The mock does not invoke
+  # anything: the function's behaviour is proved by
+  # tests/lambda/test_iam_database_users.py.
+  mock_resource "aws_lambda_invocation" {
+    defaults = { result = "{\"action\":\"create\",\"engine\":\"postgres\",\"users\":{\"app_rw\":\"created\"}}" }
+  }
 }
 
 # A fully configured cluster that trips no advisory check: terraform test
@@ -99,7 +105,7 @@ variables {
     "major_upgrade_applies_immediately", "reader_autoscaling_has_a_reader",
     "mysql_log_exports_have_their_switches", "parameter_group_family_matches_the_engine",
     "iam_auth_failures_are_logged", "iam_auth_has_memory_headroom", "master_user_keeps_its_password",
-    "audit_logs_are_retained",
+    "audit_logs_are_retained", "iam_users_exist_in_the_engine",
   ]
 }
 
@@ -147,6 +153,7 @@ run "a_postgres_cluster_user_is_granted_rds_iam" {
     iam_database_authentication_enabled = true
     enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
     iam_database_users                  = { app_rw = {} }
+    acknowledged_checks                 = ["iam_users_exist_in_the_engine"] # the DBA runs the SQL here
   }
 
   assert {
@@ -157,6 +164,18 @@ run "a_postgres_cluster_user_is_granted_rds_iam" {
   assert {
     condition     = output.governance.iam_database_users == { app_rw = "cluster" }
     error_message = "governance lists IAM users and how they connect."
+  }
+
+  assert {
+    condition = alltrue([
+      !output.iam_database_auth.users_created_by_module,
+      !output.iam_database_auth.users["app_rw"].created_by_module,
+      output.iam_database_auth.users["app_rw"].engine_status == null,
+      length(aws_lambda_function.iam_database_users) == 0,
+      length(aws_lambda_invocation.iam_database_users) == 0,
+      length(aws_iam_role.iam_database_users) == 0,
+    ])
+    error_message = "without create_iam_database_users the module creates no function and says the user is the DBA's to create."
   }
 }
 
@@ -169,6 +188,7 @@ run "a_mysql_cluster_user_uses_the_aws_plugin_and_tls" {
     iam_database_authentication_enabled = true
     enabled_cloudwatch_logs_exports     = ["error", "iam-db-auth-error"]
     iam_database_users                  = { app_rw = {} }
+    acknowledged_checks                 = ["iam_users_exist_in_the_engine"]
   }
 
   assert {
@@ -312,9 +332,259 @@ run "making_the_master_user_an_iam_user_warns" {
     iam_database_authentication_enabled = true
     enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
     iam_database_users                  = { dbadmin = {} }
+    acknowledged_checks                 = ["iam_users_exist_in_the_engine"]
   }
 
   expect_failures = [check.master_user_keeps_its_password]
+}
+
+# A user the IAM side knows and the engine does not fails every login, as if
+# the token were wrong.
+run "a_cluster_user_nobody_creates_warns" {
+  command = plan
+
+  variables {
+    iam_database_authentication_enabled = true
+    enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
+    iam_database_users                  = { app_rw = {} }
+  }
+
+  expect_failures = [check.iam_users_exist_in_the_engine]
+}
+
+# Proxy users are password users the caller creates; the warning is not for them.
+run "a_proxy_user_alone_does_not_warn_about_engine_users" {
+  command = plan
+
+  variables {
+    iam_database_users = { app = { connect_via = "proxy" } }
+    proxy = {
+      enabled            = true
+      iam_auth           = "REQUIRED"
+      secret_arns        = ["arn:aws:secretsmanager:eu-west-2:111122223333:secret:app-AbCdEf"]
+      secret_kms_key_arn = "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+      ingress_rules      = { app = { referenced_security_group_id = "sg-0123456789abcdef0", description = "orders service" } }
+      egress_rules       = { secrets = { referenced_security_group_id = "sg-0123456789abcdef5", port = 443, description = "Secrets Manager endpoint" } }
+    }
+  }
+
+  assert {
+    condition     = length(aws_lambda_invocation.iam_database_users) == 0
+    error_message = "nothing to create for a proxy user."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Creating the engine users (create_iam_database_users)
+# ---------------------------------------------------------------------------
+
+# apply: the policy and the key contract name the master secret and the
+# role ARN, which exist only once the cluster and the role do.
+run "the_module_creates_the_engine_users_through_the_data_api" {
+  command = apply
+
+  variables {
+    iam_database_authentication_enabled = true
+    enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
+    enable_data_api                     = true
+    create_iam_database_users           = true
+    iam_database_users = {
+      app_rw = {}
+      etl    = { on_remove = "drop" }
+      app    = { connect_via = "proxy" }
+    }
+    proxy = {
+      enabled            = true
+      iam_auth           = "REQUIRED"
+      secret_arns        = ["arn:aws:secretsmanager:eu-west-2:111122223333:secret:app-AbCdEf"]
+      secret_kms_key_arn = "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+      ingress_rules      = { app = { referenced_security_group_id = "sg-0123456789abcdef0", description = "orders service" } }
+      egress_rules       = { secrets = { referenced_security_group_id = "sg-0123456789abcdef5", port = 443, description = "Secrets Manager endpoint" } }
+    }
+  }
+
+  assert {
+    condition = alltrue([
+      length(aws_lambda_function.iam_database_users) == 1,
+      aws_lambda_function.iam_database_users[0].function_name == "test-cluster-dbusers",
+      aws_lambda_function.iam_database_users[0].runtime == "python3.12",
+      length(aws_lambda_function.iam_database_users[0].vpc_config) == 0,
+      aws_iam_role.iam_database_users[0].name == "test-cluster-eu-west-2-dbusers",
+      aws_cloudwatch_log_group.iam_database_users[0].name == "/aws/lambda/test-cluster-dbusers",
+    ])
+    error_message = "one function outside any VPC, a region-qualified role, and a log group created before the first run."
+  }
+
+  assert {
+    condition     = aws_lambda_invocation.iam_database_users[0].lifecycle_scope == "CRUD"
+    error_message = "CRUD: the function is told about updates (with the previous input) and about the destroy, not only the create."
+  }
+
+  # The cluster users only, each with its on_remove; the proxy user is the
+  # caller's password user.
+  assert {
+    condition = alltrue([
+      jsondecode(aws_lambda_invocation.iam_database_users[0].input).users == { app_rw = { on_remove = "revoke" }, etl = { on_remove = "drop" } },
+      jsondecode(aws_lambda_invocation.iam_database_users[0].input).engine == "postgres",
+      jsondecode(aws_lambda_invocation.iam_database_users[0].input).database == "app",
+      jsondecode(aws_lambda_invocation.iam_database_users[0].input).cluster_arn == "arn:aws:rds:eu-west-2:111122223333:cluster:test-cluster",
+    ])
+    error_message = "the function is told exactly the cluster users, the engine, the database and the cluster."
+  }
+
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role_policy.iam_database_users[0].policy).Statement :
+      st.Sid == "ExecuteOnThisCluster" ? jsonencode(st.Action) == jsonencode(["rds-data:ExecuteStatement"]) && jsonencode(st.Resource) == jsonencode(["arn:aws:rds:eu-west-2:111122223333:cluster:test-cluster"]) : true
+    ])
+    error_message = "the function may execute statements on this cluster and nothing else."
+  }
+
+  assert {
+    condition = anytrue([
+      for st in jsondecode(aws_iam_role_policy.iam_database_users[0].policy).Statement :
+      st.Sid != "DecryptAdminSecret" ? false : (
+        try(st.Condition.StringEquals["kms:ViaService"], "") != "secretsmanager.eu-west-2.amazonaws.com" ? false :
+        jsonencode(st.Resource) == jsonencode(["arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"])
+      )
+    ])
+    error_message = "the master secret's customer key is decrypted through Secrets Manager only."
+  }
+
+  assert {
+    condition = alltrue([
+      output.iam_database_auth.users_created_by_module,
+      output.iam_database_auth.users["app_rw"].created_by_module,
+      output.iam_database_auth.users["etl"].created_by_module,
+      !output.iam_database_auth.users["app"].created_by_module,
+      output.governance.iam_database_users_created_by_module,
+      output.iam_database_users_function_name == "test-cluster-dbusers",
+    ])
+    error_message = "the contract says which users the module creates: cluster users yes, the proxy user no."
+  }
+
+  assert {
+    condition     = anytrue([for r in output.kms_key_policy_requirements : r.sid == "MasterSecretReaders" && length(r.principals.arns) == 1])
+    error_message = "the key policy contract names the function's role as a reader of the master secret."
+  }
+}
+
+run "the_engine_status_is_reported_once_applied" {
+  command = apply
+
+  variables {
+    iam_database_authentication_enabled = true
+    enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
+    enable_data_api                     = true
+    create_iam_database_users           = true
+    iam_database_users                  = { app_rw = {} }
+  }
+
+  assert {
+    condition     = output.iam_database_auth.users["app_rw"].engine_status == "created"
+    error_message = "what the function reported for the user is in the contract."
+  }
+}
+
+run "a_brought_admin_secret_replaces_the_master_secret" {
+  command = apply
+
+  variables {
+    iam_database_authentication_enabled = true
+    enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
+    enable_data_api                     = true
+    create_iam_database_users           = true
+    iam_database_users                  = { app_rw = {} }
+    iam_database_users_admin_secret = {
+      arn         = "arn:aws:secretsmanager:eu-west-2:111122223333:secret:dba-createrole-AbCdEf"
+      kms_key_arn = "arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555"
+    }
+  }
+
+  assert {
+    condition     = jsondecode(aws_lambda_invocation.iam_database_users[0].input).secret_arn == "arn:aws:secretsmanager:eu-west-2:111122223333:secret:dba-createrole-AbCdEf"
+    error_message = "the function logs in with the brought secret."
+  }
+
+  assert {
+    condition = alltrue([
+      for st in jsondecode(aws_iam_role_policy.iam_database_users[0].policy).Statement :
+      st.Sid == "ReadAdminSecret" ? jsonencode(st.Resource) == jsonencode(["arn:aws:secretsmanager:eu-west-2:111122223333:secret:dba-createrole-AbCdEf"]) :
+      st.Sid == "DecryptAdminSecret" ? jsonencode(st.Resource) == jsonencode(["arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555"]) : true
+    ])
+    error_message = "the role reads the brought secret and decrypts with its key, not the master secret's."
+  }
+
+  assert {
+    condition     = anytrue([for r in output.kms_key_policy_requirements : r.sid == "MasterSecretReaders" && length(r.principals.arns) == 0])
+    error_message = "with a brought secret the function is not a reader of the master secret."
+  }
+}
+
+run "creating_engine_users_without_the_data_api_is_refused" {
+  command = plan
+
+  variables {
+    acknowledged_checks                 = var.every_check
+    iam_database_authentication_enabled = true
+    create_iam_database_users           = true
+    iam_database_users                  = { app_rw = {} }
+  }
+
+  expect_failures = [aws_rds_cluster.this]
+}
+
+run "creating_engine_users_without_a_secret_is_refused" {
+  command = plan
+
+  variables {
+    acknowledged_checks                 = var.every_check
+    iam_database_authentication_enabled = true
+    enable_data_api                     = true
+    create_iam_database_users           = true
+    iam_database_users                  = { app_rw = {} }
+    manage_master_user_password         = false
+    master_password                     = "correct-horse-battery-staple"
+    allow_plaintext_credentials         = true
+  }
+
+  expect_failures = [aws_rds_cluster.this]
+}
+
+run "an_unknown_on_remove_is_rejected" {
+  command = plan
+
+  variables {
+    iam_database_users = { app_rw = { on_remove = "nuke" } }
+  }
+
+  expect_failures = [var.iam_database_users]
+}
+
+run "a_malformed_admin_secret_arn_is_rejected" {
+  command = plan
+
+  variables {
+    iam_database_users_admin_secret = { arn = "dba-createrole" }
+  }
+
+  expect_failures = [var.iam_database_users_admin_secret]
+}
+
+run "create_false_creates_no_engine_users_either" {
+  command = plan
+
+  variables {
+    create                    = false
+    enable_data_api           = true
+    create_iam_database_users = true
+    iam_database_users        = { app_rw = {} }
+  }
+
+  assert {
+    condition     = length(aws_lambda_invocation.iam_database_users) == 0 && length(aws_lambda_function.iam_database_users) == 0 && output.iam_database_users_function_name == null
+    error_message = "create = false plans no function and no invocation."
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -329,6 +599,7 @@ run "the_contract_names_each_user_exactly" {
     enabled_cloudwatch_logs_exports     = ["postgresql", "iam-db-auth-error"]
     create_iam_database_auth_policies   = true
     enable_data_api                     = true
+    acknowledged_checks                 = ["iam_users_exist_in_the_engine"]
     iam_database_users = {
       app_rw = {}
       app    = { connect_via = "proxy" }

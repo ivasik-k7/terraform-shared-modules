@@ -93,7 +93,7 @@ variables {
     "major_upgrade_applies_immediately", "reader_autoscaling_has_a_reader",
     "mysql_log_exports_have_their_switches", "parameter_group_family_matches_the_engine",
     "iam_auth_failures_are_logged", "iam_auth_has_memory_headroom", "master_user_keeps_its_password",
-    "audit_logs_are_retained",
+    "audit_logs_are_retained", "iam_users_exist_in_the_engine",
   ]
 }
 

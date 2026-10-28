@@ -445,9 +445,11 @@ variable "endpoints" {
   validation {
     condition = alltrue([
       for k, e in var.endpoints :
-      e.secret_arn == "" ? true : can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:", e.secret_arn))
+      e.secret_arn == "" ? true : can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", e.secret_arn))
     ])
-    error_message = "endpoints[*].secret_arn must be a Secrets Manager secret ARN."
+    # The FULL ARN, with the six random characters: the module-created role's
+    # policy names this exact ARN, and a partial one does not match it.
+    error_message = "endpoints[*].secret_arn must be the full Secrets Manager ARN, ending in the six random characters (…:secret:name-AbCdEf). A partial ARN is accepted by the DMS API but does not match the secret role's policy, so the endpoint's connection test fails with a permissions error."
   }
 
   validation {

@@ -142,10 +142,11 @@ needs one `terraform init -upgrade`.
 | `parameter-groups.tf` | Cluster and instance parameter groups |
 | `password-rotation.tf` | Rotation schedule of the RDS-managed master secret |
 | `iam.tf` | Enhanced Monitoring and RDS Proxy roles with inline policies; IAM database auth policies |
+| `iam-database-users.tf` | The Lambda function, role, log group and CRUD invocation that create IAM database users in the engine |
 | `proxy.tf` | RDS Proxy, default target group, target, read-only endpoint |
 | `integrations.tf` | IAM role associations (PostgreSQL) and Database Activity Streams |
 | `observability.tf` | Log groups, event subscriptions, alarms |
-| `checks.tf` | The 36 advisory `check` blocks |
+| `checks.tf` | The 37 advisory `check` blocks |
 | `locals.tf` | Derived values: family, port, KMS fallbacks, credential path, posture |
 | `data.tf` | Partition, region and caller identity, count-gated on `create` |
 | `moved.tf` | Address migrations, kept permanently |
@@ -181,6 +182,7 @@ parameter group family with dots replaced by hyphens (`aurora-postgresql17`,
 | `aws_db_proxy_endpoint.reader` | `proxy.enabled` and `proxy.create_reader_endpoint` | `<name>-proxy-ro` |
 | `aws_iam_role.proxy`, `aws_iam_role_policy.proxy` | `proxy.enabled` and `proxy.create_role` | `<name>-<region>-proxy` |
 | `aws_iam_policy.iam_database_auth[user]` | `create_iam_database_auth_policies`, one per `iam_database_users` key | `<name>-<region>-dbuser-<user>` |
+| `aws_lambda_function.iam_database_users`, `aws_lambda_invocation.iam_database_users`, `aws_iam_role.iam_database_users`, `aws_iam_role_policy.iam_database_users`, `aws_cloudwatch_log_group.iam_database_users` | `create_iam_database_users` | `<name>-dbusers`, role `<name>-<region>-dbusers` |
 | `aws_security_group.proxy`, `aws_vpc_security_group_ingress_rule.proxy[key]`, `aws_vpc_security_group_egress_rule.proxy[key]` | `proxy.enabled` and `proxy.create_security_group` | prefix `<name>-proxy-` |
 | `aws_vpc_security_group_egress_rule.proxy_to_cluster`, `aws_vpc_security_group_ingress_rule.from_proxy` | both security groups module-created | — |
 | `aws_vpc_security_group_egress_rule.proxy_to_brought_groups[i]` | proxy group module-created, database groups brought | — |
@@ -474,6 +476,28 @@ resource ID, so a replaced or restored cluster, or a global secondary, needs
 new policies. Tokens last 15 minutes and must be generated for the endpoint
 itself, not a CNAME.
 
+**Creating the engine users.** With `create_iam_database_users = true` (and
+`enable_data_api = true`) the module runs the engine SQL itself. A Lambda
+function `<name>-dbusers`, outside any VPC, calls the RDS Data API with the
+master secret (or `iam_database_users_admin_secret`); Terraform never connects
+to the database and no password reaches state. An `aws_lambda_invocation` with
+`lifecycle_scope = "CRUD"` calls it:
+
+| When | What the function does |
+|---|---|
+| First apply, after the instances exist | Creates each cluster user and grants token login |
+| Any later apply that changes the cluster user list or an `on_remove` | Ensures every listed user; applies `on_remove` to each user that left the list |
+| An apply with no change to the list | Nothing: Terraform does not invoke it |
+| `terraform destroy`, or `create_iam_database_users = false` | Applies `on_remove` to every user |
+
+`on_remove` is per user: `revoke` (default; PostgreSQL `REVOKE rds_iam`,
+MySQL `ACCOUNT LOCK`), `drop`, or `keep`. The SQL is idempotent, so a user
+created by hand first is adopted, and a MySQL password user is converted.
+Proxy users are never created: they are password users. Each user's
+`engine_status` in `iam_database_auth` is what the last run reported. A user
+deleted by hand is not recreated until the list changes; run the apply with
+`-replace=module.<x>.aws_lambda_invocation.iam_database_users[0]` to re-run it.
+
 ### Audit logging
 
 `audit_logging.enabled` writes the engine's audit configuration into the
@@ -541,11 +565,11 @@ Three layers, all evaluated during `terraform plan`:
 
 | Layer | Count | Scope | Effect | Error shown as |
 |---|---:|---|---|---|
-| Variable `validation` | 120 | One variable | Plan fails | `Invalid value for variable` |
-| Resource `precondition` | 51 | Any combination of inputs | Plan fails before any resource is created | `Resource precondition failed` on `aws_rds_cluster.this[0]` (four are on child resources) |
-| `check` block | 36 | Inputs and planned or known state | Warning; the plan continues | `Check block assertion failed` |
+| Variable `validation` | 123 | One variable | Plan fails | `Invalid value for variable` |
+| Resource `precondition` | 53 | Any combination of inputs | Plan fails before any resource is created | `Resource precondition failed` on `aws_rds_cluster.this[0]` (four are on child resources) |
+| `check` block | 37 | Inputs and planned or known state | Warning; the plan continues | `Check block assertion failed` |
 
-Fifty-one preconditions and 120 validations refuse configurations that would
+Fifty-three preconditions and 123 validations refuse configurations that would
 fail at apply after partial creation, or that are unsafe without an explicit
 acknowledgement:
 
@@ -572,6 +596,7 @@ acknowledgement:
 | An activity stream on `db.serverless` or `db.t*`, without a customer-managed key, or in `sync` mode on aurora-mysql | API constraint |
 | Turning Performance Insights or the managed secret on for an existing cluster while a customer key is configured | The provider would send no key and AWS would fix the AWS-managed one permanently; the message gives the one-off command |
 | `iam_database_users` that connect to the cluster without `iam_database_authentication_enabled`, or through a proxy without `iam_auth = "REQUIRED"`; aurora-mysql user names over 32 characters | Every token login would fail at runtime |
+| `create_iam_database_users` without `enable_data_api`, or without a secret the Data API can log in with (the managed master secret or `iam_database_users_admin_secret`) | Every invocation would fail after the cluster exists |
 | `audit_logging` without the module's cluster parameter group, or without the engine's log export | The parameters could not be written, or the records would rotate away on the instance |
 | A proxy with fewer than two subnets, without `vpc_id` for its group, or logging in as the master user without `use_master_secret` | — |
 | Custom endpoint members that are not `instances` keys | — |
@@ -579,7 +604,7 @@ acknowledgement:
 
 ### Advisory checks
 
-Thirty-six `check` blocks warn without blocking the plan. In HCP Terraform, health
+Thirty-seven `check` blocks warn without blocking the plan. In HCP Terraform, health
 assessments re-evaluate them, so a cluster that drifts into a warned state is
 reported without a new run. Adding a check's name to `acknowledged_checks`
 silences it and records the decision in `governance.acknowledged_checks`. Every
@@ -623,6 +648,7 @@ check is silent when `create = false`.
 | `iam_auth_has_memory_headroom` | IAM database authentication on burstable instances |
 | `master_user_keeps_its_password` | `iam_database_users` includes the master user |
 | `audit_logs_are_retained` | `audit_logging` with module log groups kept for less than 365 days |
+| `iam_users_exist_in_the_engine` | Cluster `iam_database_users` without `create_iam_database_users`: the DBA must run the SQL |
 
 ---
 
@@ -700,10 +726,13 @@ module "secondary" {
     orders_ro = { connect_via = "proxy" }  # token login to RDS Proxy (proxy.iam_auth = "REQUIRED")
   }
   create_iam_database_auth_policies = true # one managed policy per user
+  enable_data_api                   = true
+  create_iam_database_users         = true # the module creates orders_rw in the engine
 ```
 
 Attach `module.orders_db.iam_database_auth.users["orders_rw"].policy_arn` to the
-application's role, and give the DBA `…users["orders_rw"].engine_sql`.
+application's role. Without `create_iam_database_users`, give the DBA
+`…users["orders_rw"].engine_sql`.
 
 **Audit logging**
 
@@ -806,8 +835,10 @@ instances = map(object({
 | `master_password` | `string`, sensitive | `""` | Static password: 8–128 characters, none of `/`, `@`, `"` or space |
 | `allow_plaintext_credentials` | `bool` | `false` | Acknowledges a static password in state |
 | `iam_database_authentication_enabled` | `bool` | `false` | IAM token authentication |
-| `iam_database_users` | `map(object({ connect_via = optional(string, "cluster") }))` | `{}` | Users that log in with IAM tokens, keyed by engine user name; `connect_via` is `cluster` or `proxy` |
+| `iam_database_users` | `map(object({ connect_via = optional(string, "cluster"), on_remove = optional(string, "revoke") }))` | `{}` | Users that log in with IAM tokens, keyed by engine user name; `connect_via` is `cluster` or `proxy`; `on_remove` is `revoke`, `drop` or `keep` |
 | `create_iam_database_auth_policies` | `bool` | `false` | One `rds-db:connect` managed policy per IAM user |
+| `create_iam_database_users` | `bool` | `false` | Create the cluster users in the engine through the Data API |
+| `iam_database_users_admin_secret` | `object({ arn = optional(string, ""), kms_key_arn = optional(string, "") })` | `{}` | Secret the user-creating function logs in with; empty is the master secret |
 
 ```hcl
 master_password_rotation = object({
@@ -1055,6 +1086,8 @@ proxy = object({
 | `proxy_reader_endpoint` | Read-only proxy endpoint, or null |
 | `proxy_role_arn` | Proxy role in use |
 | `proxy_security_group_id` | Module-created proxy security group, or null |
+| `iam_database_users_function_name` | Function that creates the IAM database users, or null |
+| `iam_database_users_role_arn` | Its execution role, or null |
 
 ### Contract outputs
 
@@ -1067,7 +1100,7 @@ Structured, non-sensitive outputs for other teams. Each is null when
 | `network_contract` | `{ subnet_group, subnet_ids, security_group_ids, database_port, proxy_port, rules_you_must_add[], vpc_endpoints[], notes[] }` |
 | `kms_key_policy_requirements` | `[{ key, principal, actions[], condition, why, sid, principals = { services[], arns[], roles[] }, conditions[{ test, variable, values[] }], purpose }]`, one entry per customer-managed key and principal group in use. The second half is contract version 2, which `modules/kms` compiles into key policy statements |
 | `sns_topic_policy_requirement` | `{ topic, statements[{ principal, action, condition, why }] }` for `events.rds.amazonaws.com` and `cloudwatch.amazonaws.com` |
-| `iam_database_auth` | `{ cluster_iam_auth_enabled, proxy_iam_auth, users = { <user> = { connect_via, resource_arn, policy_json, policy_arn, host, port, token_command, engine_sql } }, data_api_policy_json, notes[] }` |
+| `iam_database_auth` | `{ cluster_iam_auth_enabled, proxy_iam_auth, users_created_by_module, users = { <user> = { connect_via, resource_arn, policy_json, policy_arn, host, port, token_command, engine_sql, created_by_module, engine_status } }, data_api_policy_json, notes[] }` |
 | `governance` | Credentials and transport (including `iam_database_users`), network (including `egress_outside_private_ranges`), encryption (`keys`, `purposes_without_cmk`), resilience, versions (the actual `engine_lifecycle_support`), observability, `audit_logging`, `acknowledged_checks`, data egress paths, `cost_drivers` |
 | `verify_commands` | AWS CLI commands: `cluster_is_available`, `writer_is_where_you_expect`, `move_the_writer`, `parameters_are_applied`, `tls_is_enforced`, `plaintext_is_refused`, `master_secret`, `extended_support_is_off`, `alarms_have_a_target`, `audit_is_active`, `iam_token_connects`, `proxy_targets_are_available` |
 
@@ -1136,9 +1169,9 @@ VPC.
 - **Autoscaled readers are outside Terraform state.** They get no per-instance
   alarms or instance events, and must be scaled to zero before autoscaling is
   disabled or the cluster is destroyed.
-- **IAM database users and pgAudit need steps inside the engine** (the
-  `CREATE USER`/`GRANT` and `CREATE EXTENSION` statements in the contract); the
-  module does not connect to the database.
+- **pgAudit needs a step inside the engine** (`CREATE EXTENSION`), and so do
+  IAM database users unless `create_iam_database_users` is on, which needs the
+  Data API. The module never opens a database connection itself.
 - **End-to-end IAM through RDS Proxy** (`default_auth_scheme`) needs AWS
   provider v6 and is not supported while the module also supports v5.
 - **The proxy port** is the engine default, **Performance Insights** has no
@@ -1172,7 +1205,8 @@ versions can be skipped.
 |---|---|
 | `tests/aurora.tftest.hcl` | 21 runs: default resource set and posture, naming and tags, both engines, Serverless v2, autoscaling, bring-your-own, proxy, global primary and secondary, `create = false`, contract outputs, the machine-readable key policy contract, refusals and checks |
 | `tests/hardening.tftest.hcl` | 14 runs: keys on features turned on later (with an applied existing cluster), activity stream mode on MySQL, key policy requirements for stream consumers and the proxy, proxy TLS, egress ranges |
-| `tests/iam_auth.tftest.hcl` | 15 runs: exact `dbuser` ARNs for cluster and proxy users, policy documents and managed policies, engine SQL per engine, Data API policy, refusals and checks |
+| `tests/iam_auth.tftest.hcl` | 25 runs: exact `dbuser` ARNs for cluster and proxy users, policy documents and managed policies, engine SQL per engine, Data API policy, the user-creating function and its invocation, refusals and checks |
+| `tests/lambda/test_iam_database_users.py` | 26 tests: the user-creating function against a fake Data API: SQL per engine and lifecycle action, `on_remove`, idempotence, refusals, retries while the cluster resumes |
 | `tests/audit_logging.tftest.hcl` | 13 runs: pgAudit and Advanced Auditing parameters, `shared_preload_libraries` composition, caller precedence, refusals, retention check |
 | `tests/check_consistency.py` | Check names, the counts quoted here, variables, locals and examples agree with the code |
 | `tests/check_plan.py <plan.json>` | Gate for a real plan: no cluster or instance deleted or replaced, encryption, deletion protection, TLS, no public instance, no `/0` rule, no password in state; plus `--require-cmk` and `--required-tags` |
