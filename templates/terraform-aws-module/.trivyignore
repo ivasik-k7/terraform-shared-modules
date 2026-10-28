@@ -1,0 +1,2 @@
+# Accepted trivy findings, one ID per line, each with the reason above it and
+# the date it should be revisited. An entry without a reason is a finding.

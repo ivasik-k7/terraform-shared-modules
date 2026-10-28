@@ -1,14 +1,3 @@
-# Three kinds of role here, and they are not interchangeable:
-#
-#   endpoint_secret  - DMS assumes this to read one Secrets Manager secret.
-#                      The trust principal is REGIONAL (dms.<region>.amazonaws.com);
-#                      the plain dms.amazonaws.com principal is refused by
-#                      Secrets Manager and the endpoint then fails its
-#                      connection test with a permissions error naming neither.
-#   s3_target        - DMS assumes this to write to your bucket.
-#   account roles    - dms-vpc-role and friends. Fixed names, one set per
-#                      account, off by default. See variables.
-
 resource "aws_iam_role" "endpoint_secret" {
   for_each = local.create ? local.endpoints_with_secret : {}
 
@@ -18,14 +7,11 @@ resource "aws_iam_role" "endpoint_secret" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect    = "Allow"
-      Action    = "sts:AssumeRole"
+      Effect = "Allow"
+      Action = "sts:AssumeRole"
+      # DMS documents its regional service principal for the role that reads a secret.
+      # https://docs.aws.amazon.com/dms/latest/userguide/security_iam_secretsmanager.html
       Principal = { Service = "dms.${local.region}.amazonaws.com" }
-      # Confused deputy: without these, DMS acting for another account could
-      # assume it. The SourceArn is any DMS resource in this account and region,
-      # as AWS documents it: DMS presents the endpoint, task or replication
-      # config ARN depending on the operation, so narrowing it to endpoint:*
-      # risks a denied AssumeRole at run time.
       Condition = {
         StringEquals = { "aws:SourceAccount" = local.account_id }
         ArnLike = {
@@ -58,8 +44,6 @@ resource "aws_iam_role_policy" "endpoint_secret" {
       ],
       each.value.secret_kms_key_arn != "" ? [
         {
-          # A CMK-encrypted secret needs this too, and the error when it is
-          # missing talks about the secret rather than the key.
           Sid      = "DecryptSecretWithCmk"
           Effect   = "Allow"
           Action   = ["kms:Decrypt"]
@@ -73,10 +57,6 @@ resource "aws_iam_role_policy" "endpoint_secret" {
   })
 }
 
-# ---------------------------------------------------------------------------
-# S3 target access
-# ---------------------------------------------------------------------------
-
 resource "aws_iam_role" "s3_target" {
   for_each = local.create ? local.s3_targets_needing_role : {}
 
@@ -86,14 +66,9 @@ resource "aws_iam_role" "s3_target" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = "sts:AssumeRole"
-      # Both principals: S3 target roles are documented with the global one and
-      # the regional one appears in newer engine versions.
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
       Principal = { Service = ["dms.amazonaws.com", "dms.${local.region}.amazonaws.com"] }
-      # Confused deputy, as AWS documents it. Within the account, what stops
-      # another team's endpoint using this role is iam:PassRole on it - grant
-      # that narrowly.
       Condition = {
         StringEquals = { "aws:SourceAccount" = local.account_id }
         ArnLike = {
@@ -118,9 +93,6 @@ resource "aws_iam_role_policy" "s3_target" {
     Statement = concat(
       [
         {
-          # Scoped to the folder when one is given. An empty bucket_folder
-          # grants the whole bucket, which in a shared data lake means this
-          # migration can overwrite another one's output.
           Sid    = "WriteMigratedObjects"
           Effect = "Allow"
           Action = [
@@ -141,15 +113,8 @@ resource "aws_iam_role_policy" "s3_target" {
           Resource = ["arn:${local.partition}:s3:::${each.value.bucket_name}"]
         },
       ],
-      # GlueCatalogGeneration: the endpoint role creates the Glue tables and
-      # runs Athena, as the DMS S3 target documentation lists. Without these
-      # the load succeeds and the catalog never appears.
-      # s3:GetObject is bucket-wide here, unlike the write statement above,
-      # because that is the exact policy the DMS documentation gives for
-      # GlueCatalogGeneration ("Using AWS Glue Data Catalog with an Amazon S3
-      # target"): where Athena reads for the catalog is not documented to stay
-      # inside bucket_folder, and narrowing it would fail as an empty catalog
-      # with no error. A caller who needs it narrower brings their own role.
+      # The DMS S3 target guide grants GlueCatalogGeneration s3:GetObject on the whole bucket.
+      # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Target.S3.html
       each.value.glue_catalog_generation ? [
         {
           Sid    = "ReadForGlueCatalog"
@@ -182,9 +147,6 @@ resource "aws_iam_role_policy" "s3_target" {
       ] : [],
       each.value.encryption_mode == "SSE_KMS" && each.value.kms_key_arn != "" ? [
         {
-          # SSE-KMS writes need GenerateDataKey on the bucket's key, not just
-          # PutObject. Without it every object write 403s while the task
-          # reports it is running.
           Sid      = "EncryptWithTargetKey"
           Effect   = "Allow"
           Action   = ["kms:GenerateDataKey", "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey"]
@@ -194,14 +156,6 @@ resource "aws_iam_role_policy" "s3_target" {
     )
   })
 }
-
-# ---------------------------------------------------------------------------
-# Account-wide service roles
-#
-# Fixed names, one set per account. Off by default because a second module
-# instance creating dms-vpc-role fails with EntityAlreadyExists, and destroying
-# either copy breaks every migration in the account.
-# ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "dms_vpc" {
   count = local.create && var.create_account_service_roles ? 1 : 0
@@ -218,9 +172,6 @@ resource "aws_iam_role" "dms_vpc" {
     }]
   })
 
-  # No permissions_boundary: this role carries an AWS-managed policy DMS needs
-  # in full, and a landing-zone boundary that does not grant the EC2 network
-  # interface calls would cap it silently.
   tags = local.common_tags
 }
 
@@ -246,9 +197,6 @@ resource "aws_iam_role" "dms_cloudwatch_logs" {
     }]
   })
 
-  # No permissions_boundary, for the same reason as dms-vpc-role: a boundary
-  # without logs:PutLogEvents on dms-tasks-* leaves the role in place and the
-  # task logs empty.
   tags = local.common_tags
 }
 
@@ -258,15 +206,6 @@ resource "aws_iam_role_policy_attachment" "dms_cloudwatch_logs" {
   role       = aws_iam_role.dms_cloudwatch_logs[0].name
   policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonDMSCloudWatchLogsRole"
 }
-
-# ---------------------------------------------------------------------------
-# Premigration assessment
-#
-# The role DMS writes assessment reports with, scoped to one bucket prefix.
-# Trust as AWS documents it, plus the account condition. No SourceArn: what DMS
-# presents for an assessment run is not documented closely enough to pin, and
-# a wrong condition fails the run with AccessDenied.
-# ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "assessment" {
   count = local.create_assessment_role ? 1 : 0
@@ -326,8 +265,6 @@ resource "aws_iam_role_policy" "assessment" {
   })
 }
 
-# Redshift targets stage the load through S3 with this fixed-name role. The
-# console creates it; the API, and so Terraform, does not.
 resource "aws_iam_role" "dms_access_for_endpoint" {
   count = local.create && var.create_account_service_roles && local.has_redshift_target ? 1 : 0
 
@@ -343,7 +280,6 @@ resource "aws_iam_role" "dms_access_for_endpoint" {
     }]
   })
 
-  # No permissions_boundary, as for the other account-wide roles.
   tags = local.common_tags
 }
 

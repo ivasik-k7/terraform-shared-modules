@@ -1,206 +1,227 @@
-# Contributing to AWS Infrastructure Terraform Modules
+# Contributing
 
-Thank you for your interest in contributing to this project! This guide will help you understand our workflow and how to contribute effectively.
+This repository is a monorepo of independent, production Terraform modules
+for AWS, consumed from an HCP Terraform private registry. Each
+`modules/<name>/` is versioned and released on its own. This guide is the
+workflow; the conventions themselves are in `.kiro/steering/`, written once
+for people and agents alike.
 
----
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Table of Contents
+## Contents
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Setup](#development-setup)
-- [Contributing Guidelines](#contributing-guidelines)
-- [Module Standards](#module-standards)
-- [Testing](#testing)
+- [Set up](#set-up)
+- [Layout](#layout)
+- [Making a change](#making-a-change)
+- [Module standards](#module-standards)
+- [Security requirements](#security-requirements)
+- [Tests](#tests)
 - [Documentation](#documentation)
-- [Pull Request Process](#pull-request-process)
-- [Release Process](#release-process)
+- [Versioning and releases](#versioning-and-releases)
+- [What CI checks](#what-ci-checks)
+- [Governance debt](#governance-debt)
+- [Working with AI assistants](#working-with-ai-assistants)
 
----
+## Set up
 
-## Code of Conduct
+| Tool | Version | Needed for |
+|---|---|---|
+| Terraform | 1.9.8 (the floor) and the latest; aurora also 1.7.5 | `validate`, `test` |
+| Python | 3.10+ | the repository's linters and the governance check |
+| GNU make, bash, git | any recent | the `make` targets and hooks |
+| tflint, trivy, shellcheck, actionlint, pre-commit | optional locally | skipped with a note if missing; CI runs them |
 
-This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+Once per clone:
 
-## Getting Started
+```bash
+make hooks          # git config core.hooksPath .githooks
+make help           # every target
+```
 
-### Prerequisites
+The pre-commit hook refuses staged secrets, state, keys and unformatted
+`.tf` files. `pre-commit` cannot install alongside `core.hooksPath`, so run
+`make precommit` before committing if you have it.
 
-- **Terraform** >= 1.5.0
-- **AWS CLI** configured with appropriate credentials
-- **Git** for version control
-- **Make** (optional, for automation)
-
-### Development Setup
-
-1. **Fork** the repository on GitHub.
-2. **Clone** your fork:
-
-   ```bash
-   git clone [https://github.com/YOUR_USERNAME/tf-modules.git](https://github.com/YOUR_USERNAME/tf-modules.git)
-   cd tf-modules
-   ```
-
-3. **Create a feature branch**:
-
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-## Contributing Guidelines
-
-### Types of Contributions
-
-- **Bug fixes** - Fix issues in existing modules.
-- **New modules** - Add support for new AWS services.
-- **Enhancements** - Improve existing module functionality.
-- **Documentation** - Improve or add documentation.
-- **Examples** - Add usage examples.
-
-### Before You Start
-
-1. Check existing [Issues](https://www.google.com/search?q=../../issues) and [Pull Requests](https://www.google.com/search?q=../../pulls).
-2. Create an issue to discuss major changes before starting work.
-3. Follow the module standards outlined below.
-
----
-
-## Module Standards
-
-### File Structure
-
-Each module must follow this standard directory structure:
+## Layout
 
 ```text
-modules/service-name/
-├── main.tf          # Primary resources
-├── variables.tf     # Input variables
-├── outputs.tf       # Output values
-├── versions.tf      # Provider requirements
-├── README.md        # Module documentation
-└── examples/        # Usage examples
-    └── basic/
-        ├── main.tf
-        └── README.md
+modules/<name>/            the module: versions.tf, variables.tf, locals.tf, data.tf,
+                           outputs.tf, one file per resource group
+modules/<name>/tests/      *.tftest.hcl plan tests (mocked provider) + Python linters
+modules/<name>/examples/   runnable examples (CI validates every one)
+examples/<name>/           larger examples that call modules by relative path
+templates/terraform-aws-module/   the template new modules start from
+scripts/                   repo tooling: tf-modules.sh, check_governance.py, new-module.sh
+.kiro/steering/            the conventions
+.github/workflows/         CI, governance, security, release, pr-title
 ```
 
-### Code Standards
+## Making a change
 
-- **Formatting:** Use `terraform fmt -recursive` before committing.
-- **Variable Naming:** Use descriptive names (e.g., `cluster_identifier` instead of `name`). Use `snake_case`.
-- **Resource Naming:** Use `this` for primary resources (e.g., `aws_sns_topic.this`).
-- **Documentation:** Add `description` to all variables and outputs.
+1. Branch from `main`: `git switch -c feat/<module>-<topic>`.
+2. One module per pull request where possible. Each module is tagged on its
+   own, so a pull request that spans modules spans releases.
+3. Make the change, with tests (below).
+4. Verify:
 
-### Example Variable Definition
+   ```bash
+   make check MODULE=<name>     # fmt, validate, test, examples, linters, tflint/trivy if installed
+   make check                   # or: every module changed in your tree, plus repo-wide gates
+   ```
 
-```hcl
-variable "cluster_identifier" {
-  description = "The cluster identifier for the Aurora cluster"
-  type        = string
+   If the module has a `<name>-gates` job in
+   `.github/workflows/terraform-ci.yaml`, run its steps too.
+5. Add a line to the module's `CHANGELOG.md` under its unreleased heading.
+6. Open a pull request. The **title** is the squash-commit message and must be
+   a conventional commit with the module as scope:
 
-  validation {
-    condition     = length(var.cluster_identifier) > 0 && length(var.cluster_identifier) <= 63
-    error_message = "Cluster identifier must be between 1 and 63 characters."
-  }
-}
+   | Title | Means |
+   |---|---|
+   | `feat(aurora): add iam database users` | new optional capability, a minor |
+   | `fix(kms): scope create grant to aws resources` | wrong behaviour corrected, a patch |
+   | `feat(dms)!: require explicit replication instance class` | changes an unchanged caller's plan, a major |
+   | `docs(lb): ...`, `test(...)`, `ci: ...`, `refactor(...)`, `chore(...)` | no release on their own |
+
+7. The template asks what an unchanged caller's plan shows and how the change
+   was verified. Paste output, not a summary of it.
+
+### Starting a new module
+
+```bash
+scripts/new-module.sh <name>       # or: make new-module NAME=<name>
 ```
 
-### Security Requirements
+This copies the template's module layer: a working log group that passes its
+own tests. Replace it piece by piece, keeping it green. Then add the module to
+the `validate` matrix in `terraform-ci.yaml`; the governance check fails until
+you do.
 
-- **No hardcoded secrets** - Use variables marked as `sensitive = true`.
-- **Encryption by default** - Enable encryption where available.
-- **Least privilege** - Follow principle of least privilege for IAM.
+## Module standards
 
----
+The full rules and their reasons are in `.kiro/steering/10-terraform-modules.md`.
+The ones reviewers check first:
 
-## Testing
+- **Floors.** `required_version = ">= 1.9.0"`; `hashicorp/aws` as a bounded
+  range (`">= 5.x.0, < 7.0.0"`). CI tests both ends.
+- **Variables.** `type`, `description`, `nullable = false`, a default unless
+  it must be supplied, a `validation` for anything that reaches an AWS API.
+  The description is the registry's documentation; put the price of a paid
+  knob in it.
+- **The eager-operator rule.** Terraform 1.9 evaluates both sides of `||` and
+  `&&`. Never rely on short-circuit, in validations or locals.
+  `tests/lint_validations.py` enforces it.
+- **Where a rule belongs.** `validation` when a value is wrong on its own;
+  `precondition` when a combination is certainly wrong; `check` when a
+  posture is defensible but a reviewer should see it.
+- **`create = false`** plans to nothing and leaves every output null or empty.
+- **No `provider` blocks** in a module.
+- **Tags.** `merge(var.tags, { ManagedBy = "Terraform", Module = "<name>" })`,
+  module keys last. Every billable resource is attributable, including
+  transient ones.
+- **Contracts as data.** What the caller must provide (key policy statements,
+  topic policies, endpoints) is a structured output, not README prose. KMS
+  requirements use contract v2, which `modules/kms` compiles.
+- **Addresses.** Every rename gets a `moved` block, and `moved` blocks are
+  never deleted.
+- **Comments** state the mechanism or the trap, briefly. History belongs in
+  the CHANGELOG.
 
-### Local Testing
+## Security requirements
 
-Run these commands locally before submitting a PR:
+- Least privilege. A `*` in an IAM `Action` or `Resource` carries a comment
+  saying why the API forces it. Trust policies carry `aws:SourceArn` /
+  `aws:SourceAccount`; OIDC trust pins `aud` and `sub`.
+- Encryption at rest and in transit on by default, with a complete
+  customer-managed key option.
+- Nothing public by default: no `0.0.0.0/0` ingress, no public IPs, IMDSv2
+  required.
+- Nothing secret in state, plans, logs or unmarked outputs. Prefer
+  service-managed secrets and references to existing secrets; mark sensitive
+  inputs and outputs `sensitive = true`.
+- Scripts that run with privilege validate every interpolated input and never
+  download without verifying a checksum.
+- See [SECURITY.md](SECURITY.md) for reporting and for what CI scans.
 
-1. **Validation**: `terraform validate`
-2. **Formatting**: `terraform fmt -check -recursive`
-3. **Plan Testing**: `terraform plan` (requires AWS credentials)
+## Tests
 
-### Integration Testing
+From `.kiro/steering/20-tests.md`:
 
-- Test with real AWS resources in a sandbox/development account.
-- Verify resource creation, updates (idempotency), and destruction.
-
----
+- The baseline `variables` block is a **fully configured** module.
+- One `run` per property, named in prose for the property it proves.
+- Every `validation`, `precondition` and `check` has a run that trips it,
+  with `expect_failures` on the exact address.
+- `create = false` has its own run asserting resources and outputs.
+- Assert the invariant ("the policy grants exactly X to Y"), not existence.
+- `mock_provider` cannot show replacement, real data-source values or AWS
+  acceptance. Say so in a comment where it matters.
+- A Python linter ships with a `--self-test` that reintroduces each defect it
+  catches. `lint_validations.py` is shared by copy and must stay identical to
+  `modules/ami-builder/tests/lint_validations.py`.
 
 ## Documentation
 
-### README Requirements
+From `.kiro/steering/30-docs.md`. Readers are on the registry page:
 
-Each module must include a `README.md` containing:
+- README: a registry usage block first, then requirements, **what the module
+  refuses**, advisory checks, at most fifteen most-used inputs, contract
+  outputs, limits (including what has never run against real AWS), and
+  versioning.
+- No hand-written table of every input; the registry generates it from the
+  descriptions.
+- Links are **relative**. Never write the repository's URL, owner or name.
+- `COSTS.md` for anything billable: pricing date, basis, the line that grows.
+- `docs/UPGRADE-<major>.0.md` for a major that existing deployments must cross.
 
-- **Description** & **Features**.
-- **Usage examples**.
-- **Inputs/Outputs** (Automatically generated).
+## Versioning and releases
 
-### Documentation Generation
+Each module follows [SemVer](https://semver.org) independently.
 
-We use [terraform-docs](https://terraform-docs.io/) to maintain consistency:
+**Breaking** is anything that changes an unchanged caller's plan: a removed
+or renamed input or output, a new required input, **a changed default**, an
+update that becomes a replacement, an address change, a raised version floor.
 
-```bash
-terraform-docs markdown table --output-file README.md .
-```
+To release `modules/<name>` at version `X.Y.Z`:
 
----
+1. On `main`, turn the module's unreleased CHANGELOG heading into
+   `## [X.Y.Z] - YYYY-MM-DD` (through a pull request).
+2. `make release-check MODULE=<name> VERSION=X.Y.Z`
+3. Tag and push the tag: `git tag -a <name>-vX.Y.Z -m "<name> vX.Y.Z"`.
 
-## Pull Request Process
+The `release` workflow refuses a tag whose module, dated CHANGELOG entry or
+commit on `main` is missing, and publishes the GitHub release with that
+CHANGELOG section. The registry publishes from the tag. The policy behind
+this is in [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
 
-### PR Requirements
+## What CI checks
 
-- **Clear title** - Describe the impact.
-- **Detailed description** - Explain the "why" and "how".
-- **Test results** - Include a summary of your `terraform plan` output.
+| Workflow | Proves |
+|---|---|
+| `terraform-ci.yaml` | Secret scan; fmt; validate and test of every module on Terraform 1.9.8 and latest; tflint; every example validates; per-module gates (`<name>-gates`) |
+| `governance.yml` | Module conventions against the baseline, with the checker's self-test; linter copies identical; actionlint; shellcheck |
+| `security.yml` | trivy on every module the pull request touches, blocking at HIGH/CRITICAL; weekly report on all modules |
+| `pr-title.yml` | The title is a conventional commit |
+| `release.yml` | A module tag is releasable, then publishes it |
 
-### PR Template
+Every path a workflow references must be tracked in git. An untracked script
+does not exist on a fresh checkout.
 
-```markdown
-## Description
+## Governance debt
 
-Brief description of changes
+`scripts/check_governance.py` checks repository-wide conventions
+(`python3 scripts/check_governance.py --explain` lists them). Debt that
+existed when it was introduced is recorded in
+`.github/governance-baseline.json`. The check fails on a **new** violation,
+and also on a baseline entry that has been fixed, so the baseline only
+shrinks. When you fix one, delete its entry in the same pull request.
 
-## Type of Change
+## Working with AI assistants
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Breaking change
-- [ ] Documentation update
-
-## Testing
-
-- [ ] terraform validate passes
-- [ ] terraform fmt passes
-- [ ] Tested with real AWS resources
-```
-
----
-
-## Release Process
-
-### Versioning
-
-We follow [Semantic Versioning (SemVer)](https://semver.org/):
-
-- **MAJOR**: Breaking changes (e.g., removing a required variable).
-- **MINOR**: New features (backward compatible).
-- **PATCH**: Bug fixes.
-
-## Getting Help
-
-- **Issues**: Create an issue for bugs.
-- **Discussions**: Use GitHub Discussions for Q&A.
-- **Email**: Contact [kovtun.ivan@proton.me](mailto:kovtun.ivan@proton.me).
+`CLAUDE.md` and `AGENTS.md` point agents at the same steering files. Claude
+Code has project skills for creating, reviewing, security-reviewing and
+committing modules (`/tf-module-create`, `/tf-module-review`,
+`/tf-module-security`, `/tf-module-commit`). Agent output is held to the same
+bar as yours: verified in the pull request, not trusted.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the project's **MIT License**.
-
----
-
-Thank you for contributing to making infrastructure as code better! 🚀
+Contributions are licensed under the project's [MIT License](LICENSE).

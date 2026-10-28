@@ -1,0 +1,25 @@
+# Terraform working state. A module commits no lock file: the caller's root
+# module pins providers, and a lock file here would mislead (examples too).
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Tooling
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.idea/
+.vscode/

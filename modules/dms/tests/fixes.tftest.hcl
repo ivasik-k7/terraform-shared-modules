@@ -1,11 +1,3 @@
-# The fixes that the mocked suite could not see on its own, because each one
-# is about how AWS behaves rather than how the graph is shaped: SSL modes per
-# engine, the database name on the secret path, the IAM trust condition, the
-# task dimension CloudWatch publishes under, logging posture from the merged
-# settings, and the configurations DMS refuses at apply.
-#
-# Plan runs first; the apply runs at the end need the task ARN.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -16,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -47,9 +37,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -86,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -101,21 +87,14 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
 
-
-# ---------------------------------------------------------------------------
-# SSL modes DMS supports per engine
-# ---------------------------------------------------------------------------
-
 run "verify_full_on_an_oracle_source_is_rejected" {
   command = plan
 
-  # DMS supports only none and verify-ca for Oracle.
   variables {
     certificates = {
       rds-ca        = { pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----" }
@@ -267,15 +246,9 @@ run "verify_ca_on_a_sql_server_endpoint_is_rejected" {
   expect_failures = [var.endpoints]
 }
 
-# ---------------------------------------------------------------------------
-# What reaches the API
-# ---------------------------------------------------------------------------
-
 run "the_database_name_reaches_dms_on_the_secret_path" {
   command = plan
 
-  # The secret DMS reads carries host, port and credentials, not the database:
-  # the provider sends database_name on the secret path too.
   assert {
     condition = alltrue([
       aws_dms_endpoint.this["source-db"].database_name == "app",
@@ -310,10 +283,6 @@ run "role_trust_follows_the_documented_source_arn" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Logging posture comes from the merged settings
-# ---------------------------------------------------------------------------
-
 run "debug_logging_through_raw_overrides_is_caught" {
   command = plan
 
@@ -338,10 +307,6 @@ run "debug_logging_through_raw_overrides_is_caught" {
 
   expect_failures = [check.debug_logging_is_temporary]
 }
-
-# ---------------------------------------------------------------------------
-# Configurations DMS refuses at apply
-# ---------------------------------------------------------------------------
 
 run "full_lob_mode_into_s3_is_refused" {
   command = plan
@@ -384,7 +349,6 @@ run "a_cdc_start_point_in_serverless_mode_is_refused" {
     }
   }
 
-  # Serverless also trips the "not watched by this module" check.
   expect_failures = [aws_dms_replication_subnet_group.this, check.serverless_replication_is_not_watched_by_this_module]
 }
 
@@ -396,14 +360,8 @@ run "require_cmk_without_the_module_log_group_is_refused" {
     create_log_group = false
   }
 
-  # The retention check also fires: with create_log_group = false the module
-  # applies no retention, and says so rather than certifying one.
   expect_failures = [aws_dms_replication_subnet_group.this, check.log_retention_is_bounded]
 }
-
-# ---------------------------------------------------------------------------
-# Defaults that no longer trip the module's own checks
-# ---------------------------------------------------------------------------
 
 run "the_storage_alarm_follows_the_volume_by_default" {
   command = plan
@@ -438,10 +396,6 @@ run "a_pinned_version_with_automatic_minor_upgrades_warns" {
   expect_failures = [check.minor_upgrades_do_not_fight_the_pin]
 }
 
-# ---------------------------------------------------------------------------
-# Once the task exists: the dimension CloudWatch publishes under
-# ---------------------------------------------------------------------------
-
 run "cdc_alarms_and_commands_use_the_task_resource_id" {
   command = apply
 
@@ -464,11 +418,6 @@ run "cdc_alarms_and_commands_use_the_task_resource_id" {
     error_message = "operator commands carry the real task ARN, not a placeholder."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Advisory checks that had no test: each fires on its posture and is silenced
-# by acknowledging it.
-# ---------------------------------------------------------------------------
 
 run "control_tables_in_the_targets_default_schema_warn" {
   command = plan
@@ -497,7 +446,6 @@ run "a_storage_threshold_under_15_percent_warns" {
   command = plan
 
   variables {
-    # 1 GiB against the 50 GB default volume: 2%.
     alarm_free_storage_bytes = 1073741824
   }
 
@@ -519,8 +467,6 @@ run "unbounded_log_retention_warns" {
   }
 }
 
-# The gap the check used to have: create_log_group = false applies no
-# retention, and the check and governance used to certify one anyway.
 run "a_pre_existing_log_group_is_not_certified_as_bounded" {
   command = plan
 

@@ -1,0 +1,30 @@
+# Version updates for the actions and providers this repository pins. The
+# 14-day cooldown means nothing is adopted in the window when a compromised or
+# broken release is usually caught; security updates are not delayed.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: terraform
+    # One entry per example: add new examples here.
+    directories:
+      - /
+      - /examples/basic
+      - /examples/complete
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: chore

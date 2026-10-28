@@ -1,0 +1,41 @@
+name: Bug
+description: The module planned or applied something it should not have, or refused something valid.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Module version
+      placeholder: 0.3.1
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Terraform and provider versions
+      description: From `terraform version` in the workspace.
+      placeholder: Terraform 1.12.2, hashicorp/aws 6.69.1
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: The module call
+      description: Smallest configuration that shows it. Remove secrets, account IDs and ARNs you cannot share.
+      render: hcl
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The plan or apply output, or the error. Plan lines with "must be replaced" matter most.
+      render: text
+    validations:
+      required: true

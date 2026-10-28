@@ -1,0 +1,77 @@
+# Repository-level gates: module conventions (ratcheted), the workflows
+# themselves, and the repo's shell. Module-level gates live in
+# terraform-ci.yaml.
+#
+# Third-party actions are pinned to a commit SHA, with the release as a
+# comment; Dependabot proposes updates after a 14-day cooldown.
+
+name: governance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conventions:
+    name: module conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Prove the rules fire before trusting a clean result.
+      - run: python3 scripts/check_governance.py --self-test
+      - run: python3 scripts/check_governance.py
+
+      - name: Every copy of lint_validations.py matches ami-builder
+        run: |
+          set -euo pipefail
+          rc=0
+          while IFS= read -r f; do
+            diff -q modules/ami-builder/tests/lint_validations.py "$f" >/dev/null \
+              || { echo "::error file=$f::drifted from modules/ami-builder/tests/lint_validations.py"; rc=1; }
+          done < <(git ls-files '*/tests/lint_validations.py')
+          exit "$rc"
+
+  workflows:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A release binary checked against a digest recorded here, not fetched
+      # and run on trust. Bump version and digest together.
+      - name: Install actionlint 1.7.12
+        env:
+          VERSION: "1.7.12"
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+      # Uses the runner's shellcheck for run: blocks; accepted notes are in .github/actionlint.yaml.
+      - run: '"$RUNNER_TEMP/actionlint" -color'
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck .githooks/pre-commit scripts/*.sh .claude/hooks/*.sh

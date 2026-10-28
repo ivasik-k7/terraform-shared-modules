@@ -1,11 +1,3 @@
-# The fixes that the mocked suite could not see on its own, because each one
-# is about how AWS behaves rather than how the graph is shaped: SSL modes per
-# engine, the database name on the secret path, the IAM trust condition, the
-# task dimension CloudWatch publishes under, logging posture from the merged
-# settings, and the configurations DMS refuses at apply.
-#
-# Plan runs first; the apply runs at the end need the task ARN.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -16,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -47,9 +37,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -86,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -101,27 +87,19 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
 
-
-# ---------------------------------------------------------------------------
-# SSL modes DMS supports per engine
-# ---------------------------------------------------------------------------
-
-# Every advisory check can be acknowledged. Each run below puts the module in
-# the posture the check warns about, acknowledges it, and proves two things:
-# the plan is quiet, and the decision is listed in governance for a reviewer.
-
 run "acknowledging_somebody_hears_a_failed_task_is_quiet_and_listed" {
   command = plan
 
   variables {
-    sns_topic_arn       = ""
-    acknowledged_checks = ["somebody_hears_a_failed_task"]
+    sns_topic_arn              = ""
+    create_alarms              = false
+    create_event_subscriptions = false
+    acknowledged_checks        = ["somebody_hears_a_failed_task"]
   }
 
   assert {

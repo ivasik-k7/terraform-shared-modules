@@ -1,67 +1,42 @@
-## Description
+<!--
+The title becomes the squash-commit message: type(module): subject
+  feat(aurora): ...     new optional input, output or check      -> minor
+  fix(kms): ...         wrong behaviour corrected                -> patch
+  feat(dms)!: ...       anything that changes an unchanged caller's plan -> major
+One module per pull request where possible: each module is versioned and tagged on its own.
+-->
 
-Brief description of the changes in this PR.
+## What and why
 
-## Type of Change
+<!-- One paragraph: the change, and the failure or need behind it. -->
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Refactoring (no functional changes)
+**Module(s):** `modules/...`
 
-## Module(s) Affected
+## What an unchanged caller's plan shows
 
-- [ ] Aurora
-- [ ] ECR
-- [ ] EKS
-- [ ] EFS
-- [ ] SQS
-- [ ] SNS
-- [ ] Network Hub
-- [ ] Other: ___________
+- [ ] Nothing changes
+- [ ] It changes, and the module's CHANGELOG says how. **BREAKING** if it removes or renames an input or output, adds a required input, changes a default, turns an update into a replacement, moves an address, or raises a version floor
 
-## Testing
+<!-- If an address moved: the moved block, and the plan line showing "has moved to". -->
 
-- [ ] `terraform validate` passes
-- [ ] `terraform fmt` passes
-- [ ] `terraform plan` succeeds
-- [ ] Tested with real AWS resources
-- [ ] Added/updated tests
-- [ ] All existing tests pass
+## How it was verified
 
-## Documentation
+<!-- Paste the tail of the run, not a summary of it. -->
 
-- [ ] Updated module README.md
-- [ ] Updated CHANGELOG.md
-- [ ] Added/updated examples
-- [ ] Updated variable descriptions
-- [ ] Updated output descriptions
+- [ ] `make check MODULE=<name>`: fmt, validate, tests, examples, linters with their self-tests
+- [ ] A test asserts the new behaviour's invariant, not that a resource exists
+- [ ] Every new `validation`, `precondition` and `check` has a run with the input that trips it
+- [ ] Provider facts this relies on (replacement, defaults, enums) were checked in `terraform providers schema -json` or the provider source, not recalled
+- [ ] Not verified, and why (needs an apply, credentials, a real account):
 
 ## Security
 
-- [ ] No hardcoded secrets or credentials
-- [ ] Follows security best practices
-- [ ] Uses encryption where applicable
-- [ ] Follows principle of least privilege
+- [ ] IAM: no new `*` action or resource without a stated reason; trust policies carry source conditions
+- [ ] Nothing secret reaches state, plan or an output unmarked
+- [ ] KMS requirements emitted as contract v2 data, if the module uses a customer key
 
-## Breaking Changes
+## Docs and cost
 
-If this is a breaking change, describe what breaks and how to migrate:
-
-```
-N/A
-```
-
-## Additional Notes
-
-Any additional information that reviewers should know.
-
-## Checklist
-
-- [ ] My code follows the project's style guidelines
-- [ ] I have performed a self-review of my code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
+- [ ] README: new refusals, checks or contract outputs; the limits section is still true
+- [ ] COSTS.md, if this adds or moves a billable line; the cost-bearing input's description states the price
+- [ ] Governance baseline only shrank (`.github/governance-baseline.json`)

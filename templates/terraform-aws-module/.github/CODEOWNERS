@@ -1,0 +1,6 @@
+# Every change needs a review from the module's owners. Replace the team.
+*                        @CTO/platform-terraform
+
+# The release machinery and the gate: changes here change what "tested" means.
+/.github/                @CTO/platform-terraform
+/release-please-config.json  @CTO/platform-terraform

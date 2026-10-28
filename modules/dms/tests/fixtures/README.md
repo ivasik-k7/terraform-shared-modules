@@ -9,3 +9,7 @@ To regenerate after a deliberate change to the rendering, take
 `settings = { lob_mode = "<MODE>" }` and write it here pretty-printed with
 sorted keys; the test then goes green again, and the linter re-checks the
 result.
+
+`same-root/` is a root that creates the secrets, key, topic and roles next to
+the module, so their ARNs are unknown at plan; `tests/same_root.tftest.hcl`
+plans it.

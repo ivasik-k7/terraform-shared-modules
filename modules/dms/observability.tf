@@ -1,15 +1,4 @@
-# The failure this file exists for: a CDC task stops, the target stops receiving
-# changes, and nothing anywhere goes red. The source keeps taking writes, the
-# gap grows, and it is found at cutover.
-#
-# Two defences. Event subscriptions catch the state change; the latency alarms
-# catch the case where the task is technically running and falling behind. Both
-# need an SNS topic - without one this file creates almost nothing.
-
 locals {
-  # The module creates and owns the task log group, so log_retention_days is
-  # actually applied, only in this case. governance and the retention check
-  # read this rather than the variable.
   log_group_managed = local.provisioned && var.create_log_group && var.log_retention_days > 0
 }
 
@@ -24,8 +13,6 @@ resource "aws_cloudwatch_log_group" "tasks" {
 
   lifecycle {
     precondition {
-      # These logs carry row-level data at DEBUG severity, so require_cmk has to
-      # mean this group too - not just the replication storage.
       condition     = var.require_cmk ? var.kms_key_arn != "" : true
       error_message = "require_cmk = true but kms_key_arn is empty, so DMS task logs - which contain row data and SQL at DEBUG severity - would sit under the AWS-managed CloudWatch Logs key."
     }
@@ -33,7 +20,7 @@ resource "aws_cloudwatch_log_group" "tasks" {
 }
 
 resource "aws_dms_event_subscription" "instance" {
-  count = local.create && local.provisioned && var.sns_topic_arn != "" && var.create_event_subscriptions ? 1 : 0
+  count = local.create && local.provisioned && var.create_event_subscriptions ? 1 : 0
 
   name             = "${var.name}-instance"
   sns_topic_arn    = var.sns_topic_arn
@@ -46,28 +33,17 @@ resource "aws_dms_event_subscription" "instance" {
 }
 
 resource "aws_dms_event_subscription" "task" {
-  count = local.create && local.provisioned && var.sns_topic_arn != "" && var.create_event_subscriptions && length(var.tasks) > 0 ? 1 : 0
+  count = local.create && local.provisioned && var.create_event_subscriptions && length(var.tasks) > 0 ? 1 : 0
 
-  name          = "${var.name}-tasks"
-  sns_topic_arn = var.sns_topic_arn
-  source_type   = "replication-task"
-  source_ids    = concat([for k, t in aws_dms_replication_task.this : t.replication_task_id], [for k, t in aws_dms_replication_task.validation : t.replication_task_id])
-  # "state change" is the one that fires when a task stops on its own.
+  name             = "${var.name}-tasks"
+  sns_topic_arn    = var.sns_topic_arn
+  source_type      = "replication-task"
+  source_ids       = concat([for k, t in aws_dms_replication_task.this : t.replication_task_id], [for k, t in aws_dms_replication_task.validation : t.replication_task_id])
   event_categories = var.task_event_categories
   enabled          = true
 
   tags = local.common_tags
 }
-
-# ---------------------------------------------------------------------------
-# Alarms
-#
-# treat_missing_data = "breaching" on the CDC alarms is deliberate and is the
-# most important line in this file. A stopped task publishes NO latency
-# datapoints at all, so the default ("missing") leaves the alarm in INSUFFICIENT
-# DATA - green on a dashboard - for as long as the task stays down. Treating
-# silence as breaching turns "no data" into the alert it actually is.
-# ---------------------------------------------------------------------------
 
 locals {
   cdc_tasks = {
@@ -75,7 +51,7 @@ locals {
     if contains(["cdc", "full-load-and-cdc"], t.migration_type)
   }
 
-  alarms_enabled = local.create && local.provisioned && var.create_alarms && var.sns_topic_arn != ""
+  alarms_enabled = local.create && local.provisioned && var.create_alarms
 
   free_storage_alarm_bytes = var.alarm_free_storage_bytes > 0 ? var.alarm_free_storage_bytes : ceil(var.allocated_storage_gb * 1073741824 * 0.15)
 }
@@ -93,14 +69,13 @@ resource "aws_cloudwatch_metric_alarm" "cdc_latency_target" {
   evaluation_periods  = 3
   threshold           = var.alarm_cdc_latency_seconds
   comparison_operator = "GreaterThanThreshold"
-  treat_missing_data  = "breaching"
+  # Under the default, missing, an alarm whose datapoints are all missing is INSUFFICIENT_DATA.
+  # https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/alarms-and-missing-data.html
+  treat_missing_data = "breaching"
 
   dimensions = {
     ReplicationInstanceIdentifier = aws_dms_replication_instance.this[0].replication_instance_id
-    # The task's resource ID (last segment of its ARN), not its name - DMS
-    # publishes task metrics under it. With the name the alarm never gets a
-    # datapoint and, missing data being breaching, sits in ALARM for good.
-    ReplicationTaskIdentifier = local.task_resource_ids[each.key]
+    ReplicationTaskIdentifier     = local.task_resource_ids[each.key]
   }
 
   alarm_actions = [var.sns_topic_arn]
@@ -125,20 +100,13 @@ resource "aws_cloudwatch_metric_alarm" "cdc_latency_source" {
 
   dimensions = {
     ReplicationInstanceIdentifier = aws_dms_replication_instance.this[0].replication_instance_id
-    # The task's resource ID (last segment of its ARN), not its name - DMS
-    # publishes task metrics under it. With the name the alarm never gets a
-    # datapoint and, missing data being breaching, sits in ALARM for good.
-    ReplicationTaskIdentifier = local.task_resource_ids[each.key]
+    ReplicationTaskIdentifier     = local.task_resource_ids[each.key]
   }
 
   alarm_actions = [var.sns_topic_arn]
   tags          = local.common_tags
 }
 
-# Validation. A mismatch, or validation suspending itself at FailureMaxCount,
-# is the reconciliation evidence failing - quietly, unless something alarms.
-# Silence is not breaching here: a task that validated everything and stopped
-# publishes nothing, and that is the good outcome.
 locals {
   validating_tasks = merge(
     { for k in keys(var.tasks) : "task:${k}" => { task_key = k, validation = false } if(try(local.task_settings_merged[k].ValidationSettings.EnableValidation, false) ? local.task_validation_feasible[k] : false) },
@@ -269,27 +237,15 @@ resource "aws_cloudwatch_metric_alarm" "freeable_memory" {
   tags          = local.common_tags
 }
 
-# ---------------------------------------------------------------------------
-# Checks
-#
-# Warnings, not refusals. Postures the module will let you have but a reviewer
-# should see at plan time.
-# ---------------------------------------------------------------------------
-
 check "somebody_hears_a_failed_task" {
   assert {
     condition = contains(local.acknowledged, "somebody_hears_a_failed_task") ? true : (
-      !local.create ? true : (length(var.tasks) == 0 ? true : var.sns_topic_arn != "")
+      !local.create ? true : (length(var.tasks) == 0 ? true : var.create_event_subscriptions)
     )
-    error_message = "sns_topic_arn is empty, so no event subscription and no alarm exists. A DMS task that stops does not retry and does not report anywhere: the target simply stops receiving changes while the source keeps taking writes."
+    error_message = "create_event_subscriptions is off, so no event subscription exists. A DMS task that stops does not retry and does not report anywhere: the target simply stops receiving changes while the source keeps taking writes."
   }
 }
 
-# Serverless gets no latency alarms and no log group from this module. DMS
-# event subscriptions only carry source types for replication instances and
-# tasks; a serverless replication's failure is an EventBridge event instead,
-# which the rule below forwards. That covers a replication that FAILS, not one
-# that runs and falls behind, so the check still warns.
 check "serverless_replication_is_not_watched_by_this_module" {
   assert {
     condition = contains(local.acknowledged, "serverless_replication_is_not_watched_by_this_module") ? true : (
@@ -299,9 +255,6 @@ check "serverless_replication_is_not_watched_by_this_module" {
   }
 }
 
-# The exception rows DMS writes when a row fails to apply contain the source
-# data and the statement. With no control schema they land in the target's
-# default schema - inside a production database, in scope for its backups.
 check "control_tables_have_their_own_schema" {
   assert {
     condition = contains(local.acknowledged, "control_tables_have_their_own_schema") ? true : (
@@ -311,13 +264,6 @@ check "control_tables_have_their_own_schema" {
   }
 }
 
-# DMS ignores a task-settings key it does not recognise - no error, no event,
-# no log line. So "EnableValdiation": true in raw_overrides is a task that
-# runs, reports success, and validates nothing. The typed settings cannot be
-# misspelled; raw_overrides can, and this is where it is caught. A check, not
-# a refusal: the list follows the DMS documentation and DMS adds keys between
-# engine versions, so a legitimate new key must be acknowledgeable while the
-# list catches up.
 check "raw_overrides_use_known_task_settings" {
   assert {
     condition = contains(local.acknowledged, "raw_overrides_use_known_task_settings") ? true : (
@@ -327,8 +273,6 @@ check "raw_overrides_use_known_task_settings" {
   }
 }
 
-# Row-level logs are a copy of the data. In a bank that is a different
-# classification of log group from an operational one.
 check "debug_logging_is_temporary" {
   assert {
     condition = contains(local.acknowledged, "debug_logging_is_temporary") ? true : (
@@ -341,8 +285,6 @@ check "debug_logging_is_temporary" {
   }
 }
 
-# A full load into a target whose triggers and foreign keys are live is slow at
-# best and wrong at worst.
 check "the_full_load_is_not_fighting_the_targets_constraints" {
   assert {
     condition = contains(local.acknowledged, "the_full_load_is_not_fighting_the_targets_constraints") ? true : (
@@ -352,7 +294,6 @@ check "the_full_load_is_not_fighting_the_targets_constraints" {
   }
 }
 
-# A static byte threshold against a volume whose size is a variable.
 check "the_storage_alarm_leaves_room_to_react" {
   assert {
     condition = contains(local.acknowledged, "the_storage_alarm_leaves_room_to_react") ? true : (
@@ -382,10 +323,6 @@ check "tasks_write_logs" {
   }
 }
 
-# Bounded means bounded BY THIS MODULE: with create_log_group = false the group
-# carries whatever retention it already has - none, if DMS created it - and
-# log_retention_days is not applied to anything, so governance must not report
-# it as if it were.
 check "log_retention_is_bounded" {
   assert {
     condition = contains(local.acknowledged, "log_retention_is_bounded") ? true : (
@@ -406,8 +343,6 @@ check "replication_survives_an_az" {
 
 check "full_load_does_not_leave_the_meter_running" {
   assert {
-    # A provisioned instance keeps billing after the one-off load finishes, and
-    # nothing in DMS turns it off.
     condition = contains(local.acknowledged, "full_load_does_not_leave_the_meter_running") ? true : (
       !local.create ? true : (local.provisioned && length(var.tasks) > 0 ? anytrue([
         for k, t in var.tasks : contains(["cdc", "full-load-and-cdc"], t.migration_type)
@@ -444,8 +379,6 @@ check "transport_is_verified" {
   }
 }
 
-# A pinned engine_version with automatic minor upgrades: after AWS upgrades the
-# instance, the next plan tries to move it back, and DMS refuses a downgrade.
 check "minor_upgrades_do_not_fight_the_pin" {
   assert {
     condition = contains(local.acknowledged, "minor_upgrades_do_not_fight_the_pin") ? true : (
@@ -455,7 +388,6 @@ check "minor_upgrades_do_not_fight_the_pin" {
   }
 }
 
-# Oracle SSL in DMS works from an Oracle wallet, not a PEM CA bundle.
 check "oracle_ssl_uses_a_wallet" {
   assert {
     condition = contains(local.acknowledged, "oracle_ssl_uses_a_wallet") ? true : (
@@ -465,8 +397,6 @@ check "oracle_ssl_uses_a_wallet" {
   }
 }
 
-# EnableValidation on an engine DMS cannot validate is accepted and does
-# nothing. Without this, governance would show a reconciliation that never ran.
 check "validation_is_claimed_where_it_cannot_run" {
   assert {
     condition = contains(local.acknowledged, "validation_is_claimed_where_it_cannot_run") ? true : (
@@ -476,24 +406,13 @@ check "validation_is_claimed_where_it_cannot_run" {
   }
 }
 
-# DMS needs both roles by these exact names, and neither failure says so: a
-# missing dms-vpc-role fails the subnet group with an error naming neither the
-# role nor the fix, and a missing dms-cloudwatch-logs-role leaves the task log
-# group empty while the task runs - a task that moves nothing and logs nothing.
-# Looked up rather than assumed. The plan principal needs iam:ListRoles - the
-# data source lists the account's roles and filters by name on the client - and
-# a lookup that fails is reported as a warning, never an error. A check-scoped
-# data source cannot take count, so this read happens on every plan, create =
-# false and create_account_service_roles = true included; moving it to a
-# top-level data source would make a failed lookup an error, which is the wrong
-# trade for an advisory check.
+# A data source inside a check block cannot use count or for_each.
 check "account_service_roles_exist" {
   data "aws_iam_roles" "dms_service" {
     name_regex = "^dms-(vpc|cloudwatch-logs)-role$|^dms-access-for-endpoint$"
   }
 
   assert {
-    # Nothing to look for when this module creates them.
     condition = contains(local.acknowledged, "account_service_roles_exist") || !local.create || var.create_account_service_roles ? true : (
       length(setsubtract(local.required_account_roles, data.aws_iam_roles.dms_service.names)) == 0
     )
@@ -501,12 +420,10 @@ check "account_service_roles_exist" {
   }
 }
 
-# A serverless replication that fails publishes an EventBridge event (source
-# aws.dms, category Failure) - the only failure signal that mode has. Matched
-# on this migration's replication config ARNs. The topic policy must let
-# events.amazonaws.com publish: see output.notification_requirements.
+# A failed serverless replication is an EventBridge event from aws.dms, category Failure.
+# https://docs.aws.amazon.com/dms/latest/userguide/CHAP_EventBridge.html
 resource "aws_cloudwatch_event_rule" "serverless_failures" {
-  count = local.create && local.serverless && var.sns_topic_arn != "" && var.create_event_subscriptions && length(var.tasks) > 0 ? 1 : 0
+  count = local.create && local.serverless && var.create_event_subscriptions && length(var.tasks) > 0 ? 1 : 0
 
   name        = "${var.name}-dms-replication-failures"
   description = "DMS Serverless replication failures for the ${var.name} migration"

@@ -42,7 +42,11 @@ terraform.rc
 ################################################################################
 
 # Visual Studio Code
-.vscode/
+# .vscode/* rather than .vscode/, because git cannot re-include a file whose
+# parent directory is excluded - and the agent permission list below is a
+# security control, so it belongs in review rather than in local settings.
+.vscode/*
+!.vscode/settings.json
 *.code-workspace
 .history/
 
@@ -109,6 +113,23 @@ $RECYCLE.BIN/
 **/*credentials*
 **/*key.pem
 **/*key.json
+*.key
+*.p12
+*.pfx
+
+# The name patterns above also matched source files (a runner's secrets.py,
+# a secretsmanager.rego policy), which then silently never reached CI.
+# Source is never secret material; re-include it by extension.
+!**/*secret*.tf
+!**/*secret*.tftpl
+!**/*secret*.hcl
+!**/*secret*.py
+!**/*secret*.rego
+!**/*secret*.sh
+!**/*secret*.md
+!**/*credentials*.tf
+!**/*credentials*.py
+!**/*credentials*.md
 
 ################################################################################
 # Dependency Management
@@ -216,3 +237,12 @@ cost-projection-aws-migration.md
 ################################################################################
 modules/*/REQ.txt
 modules/*/creq.txt
+
+################################################################################
+# Local tooling state
+################################################################################
+# Windows attaches these to files downloaded into WSL.
+*:Zone.Identifier
+# Personal Claude Code overrides; .claude/settings.json is the shared one.
+.claude/settings.local.json
+.claude/worktrees/

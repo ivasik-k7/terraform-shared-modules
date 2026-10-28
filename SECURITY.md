@@ -1,126 +1,73 @@
-# Security Policy
+# Security policy
 
-To make this table look more professional and visually clear for a GitHub repository, we can add **Status** and **Security Support** columns. This helps users understand at a glance whether they should migrate or if their current version is safe.
+## Reporting a vulnerability
 
-## Supported Versions
+Report privately, never as a public issue or pull request:
 
-We are committed to providing security updates for the current major release. To ensure your infrastructure remains secure, please use the latest versions.
+1. **Preferred:** the **Report a vulnerability** button on the repository's
+   Security tab (private vulnerability reporting).
+2. **Otherwise:** email [kovtun.ivan@proton.me](mailto:kovtun.ivan@proton.me)
+   with the subject `[SECURITY] <module>: <short description>`.
 
-| Version      | Status          | Security Updates   | Recommended Action                |
-| ------------ | --------------- | ------------------ | --------------------------------- |
-| **v1.x.x**   | 🟢 Active       | :white_check_mark: | Use latest stable release         |
-| **v0.x.x**   | 🔴 End of Life  | :x:                | **Upgrade to v1.x.x immediately** |
-| **Beta/Dev** | 🟡 Experimental | :warning:          | Use for testing only              |
+Include the module and version (the tag, e.g. `aurora-v2.0.0`), a minimal
+configuration that shows the problem, what it exposes, and a fix if you have
+one.
 
----
+| Step | Target |
+|---|---|
+| Acknowledgement | 2 working days |
+| Assessment and severity | 5 working days |
+| Fix released for Critical / High | as fast as the fix can be proven, normally within 14 days |
+| Advisory published | when the fixed version is tagged |
 
-### Why this is better:
+Reporters are credited in the advisory unless they ask not to be.
 
-- **Status Indicators:** Emojis (🟢/🔴) provide an instant visual cue that doesn't rely solely on reading the text.
-- **Recommended Action:** It tells the user exactly what to do if they are on an unsupported version, which reduces support questions.
-- **Clearer Versioning:** Adding the `v` prefix and bold text makes the versions stand out better in Markdown.
+## Supported versions
 
-Would you like me to add a section below this table that explains **how** users should handle breaking changes when moving from `< 1.0` to `1.x.x`?
+Modules are versioned independently (tags `<module>-vX.Y.Z`).
 
-## Reporting a Vulnerability
+| Version of a module | Security fixes |
+|---|---|
+| Latest minor of the current major | Yes |
+| Previous major | For 6 months after the next major is tagged |
+| `0.x` and anything marked experimental in its README | Best effort; upgrade |
+| Untagged `main` | No: consume tagged versions |
 
-We take security seriously. If you discover a security vulnerability in this project, please report it responsibly.
+## What counts as a vulnerability here
 
-### How to Report
+- The module grants more than its documentation says: IAM policies, trust
+  policies, key policies, resource policies, network rules.
+- A secret reaches state, a plan, logs or an output that is not marked
+  `sensitive`.
+- A refusal or guard the README promises can be bypassed by a valid
+  configuration.
+- An insecure default: public exposure, encryption off, audit logging off,
+  IMDSv1, without the description making the trade-off explicit.
+- Code the module runs with privilege (user data, SSM documents, build
+  components, container entrypoints) can be made to run caller-controlled
+  input.
+- A supply-chain gap: an unpinned artifact fetched at runtime, a download
+  without checksum verification.
 
-**Please do NOT create a public GitHub issue for security vulnerabilities.**
+Out of scope: misconfiguration by the caller that the module documents as the
+caller's responsibility, and findings in examples that are labelled as
+non-production.
 
-Instead, please report security issues by emailing:
+## What this repository does about it
 
-📧 **kovtun.ivan@proton.me**
+| Control | Where |
+|---|---|
+| Secret scanning on every push and pull request | gitleaks in `terraform-ci.yaml`; `.githooks/pre-commit`; pre-commit's `gitleaks` and `detect-private-key` |
+| Misconfiguration scan of every changed module, blocking at HIGH/CRITICAL | `.github/workflows/security.yml` (trivy); accepted findings in `.trivyignore`, each with a reason |
+| IAM policy rendering and linting for modules that write policies | the `<module>-gates` jobs in `terraform-ci.yaml` |
+| Workflow linting | `.github/workflows/governance.yml` (actionlint) |
+| Third-party actions pinned to commit SHAs; updates after a 14-day cooldown | every workflow; `.github/dependabot.yml` |
+| Changes to `main` only through reviewed pull requests | branch protection and `.github/CODEOWNERS` (see [docs/GOVERNANCE.md](docs/GOVERNANCE.md)) |
+| Security review of modules before release | `/tf-module-security` (see [CLAUDE.md](CLAUDE.md)) |
 
-**Please include the following information:**
+## For contributors
 
-- **Description** of the vulnerability
-- **Steps to reproduce** the issue
-- **Potential impact** assessment
-- **Suggested fix** (if available)
-
-### What to Expect
-
-1. **Acknowledgment** - We'll acknowledge receipt within 48 hours.
-2. **Assessment** - We'll assess the vulnerability within 5 business days.
-3. **Resolution** - We'll work on a fix and coordinate disclosure.
-4. **Credit** - We'll credit you in the security advisory (if desired).
-
----
-
-## Security Considerations for Infrastructure Code
-
-### High-Risk Areas
-
-- **IAM Policies** - Overly permissive access controls.
-- **Security Groups** - Open ingress rules (e.g., `0.0.0.0/0`).
-- **Encryption** - Missing or weak encryption configurations.
-- **Secrets Management** - Hardcoded credentials or keys.
-- **Network Security** - Insecure network configurations.
-
-### Common Vulnerabilities
-
-- **Privilege Escalation** - IAM roles with excessive permissions.
-- **Data Exposure** - Unencrypted storage or transmission.
-- **Network Exposure** - Resources accessible from the internet.
-- **Credential Leakage** - Secrets in code or logs.
-- **Misconfiguration** - Insecure default settings.
-
----
-
-## Security Best Practices
-
-### For Contributors
-
-- Never commit secrets, API keys, or credentials.
-- Use `sensitive = true` for sensitive variables.
-- Follow the principle of least privilege for IAM.
-- Enable encryption by default where available.
-- Validate input parameters to prevent injection.
-- Use secure defaults in module configurations.
-
-### For Users
-
-- Review all module configurations before deployment.
-- Use AWS Config Rules to monitor compliance.
-- Enable CloudTrail for audit logging.
-- Regularly rotate credentials and access keys.
-- Monitor AWS Security Hub for security findings.
-- Keep Terraform and provider versions updated.
-
----
-
-## Security Testing
-
-We recommend using these tools to scan infrastructure code:
-
-- **Checkov** - Static analysis for Terraform
-- **tfsec** - Security scanner for Terraform
-- **Terrascan** - Policy as code scanner
-- **AWS Config** - Compliance monitoring
-- **AWS Security Hub** - Centralized security findings
-
----
-
-## Disclosure Policy
-
-- We follow responsible disclosure practices.
-- Security patches will be backported to supported versions.
-- We'll publish security advisories for confirmed vulnerabilities.
-- We may request coordinated disclosure timing for critical issues.
-
-## Contact Information
-
-For security-related questions or concerns:
-
-- **Email**: [kovtun.ivan@proton.me](mailto:kovtun.ivan@proton.me)
-- **Subject**: `[SECURITY] Brief description`
-- **PGP Key**: Available upon request.
-
-## Hall of Fame
-
-We recognize security researchers who help improve our project:
-
-_No security issues have been reported yet._
+The rules a module must meet are in [CONTRIBUTING.md](CONTRIBUTING.md#security-requirements).
+Never commit credentials, state, `*.tfvars`, keys or certificates; the hooks
+refuse them, and a secret that reached history must be rotated, not just
+deleted.

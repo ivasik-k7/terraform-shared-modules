@@ -1,0 +1,64 @@
+#!/bin/sh
+# Catches the two things that are painful to undo once committed: a secret in
+# history, and a formatting failure that CI will reject anyway.
+#
+#   git config core.hooksPath .githooks
+
+fail=0
+
+note() {
+	printf '\n  COMMIT REFUSED  %s\n' "$1" >&2
+	shift
+	for line in "$@"; do printf '    %s\n' "$line" >&2; done
+	fail=1
+}
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# --- files that should never be in git ------------------------------------
+secrets=$(printf '%s\n' "$staged" | grep -E '(^|/)\.env$|\.pem$|\.p12$|\.pfx$|\.key$|(^|/)id_(rsa|ed25519)$|\.tfvars$|terraform\.tfstate|(^|/)credentials$' || true)
+if [ -n "$secrets" ]; then
+	note "these files carry credentials or state:" "$secrets" "" \
+		"They are in .gitignore; something used 'git add -f'." \
+		"Unstage with: git restore --staged <file>"
+fi
+
+# --- credential material inside the diff ----------------------------------
+# AKIAIOSFODNN7EXAMPLE is AWS's own documentation key and appears in this repo's
+# linter self-tests, so it is filtered out rather than matched.
+added=$(git diff --cached -U0 | grep '^+' | grep -v '^+++' | grep -v 'AKIAIOSFODNN7EXAMPLE' || true)
+
+if printf '%s\n' "$added" | grep -qE '(AKIA|ASIA)[0-9A-Z]{16}'; then
+	note "an AWS access key id appears in the staged diff." \
+		"Rotate it, then commit without it."
+fi
+if printf '%s\n' "$added" | grep -qE 'glrt-[A-Za-z0-9_-]{10,}'; then
+	note "a GitLab runner token appears in the staged diff." \
+		"Those belong in SSM, never in a repo."
+fi
+if printf '%s\n' "$added" | grep -qE '^\+-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+	note "a private key appears in the staged diff."
+fi
+
+# --- formatting, because CI gates on it -----------------------------------
+if command -v terraform >/dev/null 2>&1; then
+	tf=$(printf '%s\n' "$staged" | grep -E '\.tf$|\.tftest\.hcl$' || true)
+	if [ -n "$tf" ]; then
+		unformatted=""
+		for f in $tf; do
+			[ -f "$f" ] || continue
+			if ! terraform fmt -check "$f" >/dev/null 2>&1; then
+				unformatted="$unformatted $f"
+			fi
+		done
+		if [ -n "$unformatted" ]; then
+			note "not formatted, and CI checks this:" "$unformatted" "" \
+				"Fix with: terraform fmt$unformatted"
+		fi
+	fi
+fi
+
+[ "$fail" -eq 0 ] && exit 0
+printf '\n' >&2
+exit 1

@@ -7,15 +7,12 @@ locals {
     "Migration" = var.name
   })
 
-  # Placeholders so ARN expressions still evaluate when create = false.
   partition  = coalesce(one(data.aws_partition.current[*].partition), "aws")
   region     = coalesce(one(data.aws_region.current[*].name), "us-east-1")
   account_id = coalesce(one(data.aws_caller_identity.current[*].account_id), "000000000000")
 
   acknowledged = toset(var.acknowledged_checks)
 
-  # A Redshift target stages through S3 with the fixed-name account role
-  # dms-access-for-endpoint, which the API path never creates for you.
   has_redshift_target = anytrue([for k, e in var.endpoints : e.engine == "redshift" && e.role == "target"])
 
   required_account_roles = concat(
@@ -26,55 +23,41 @@ locals {
   provisioned = var.compute_mode == "provisioned"
   serverless  = var.compute_mode == "serverless"
 
-  # DMS Serverless supports a subset of DMS Standard ("AWS DMS Serverless
-  # components", supported endpoints): no SAP ASE at all, Db2 as a source only,
-  # and ("AWS DMS Serverless limitations") no SSL on Db2 endpoints. A
-  # replication on any of these applies cleanly and fails at Testing
-  # Connection. Endpoint keys with the reason, for the precondition's message.
+  notifications_need_topic = (
+    (var.create_event_subscriptions && (local.provisioned || length(var.tasks) > 0))
+    || (var.create_alarms && local.provisioned)
+  )
+
+  # DMS Serverless supports fewer endpoint types than DMS standard, and no SSL on Db2 endpoints.
+  # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Serverless.Limitations.html
   endpoints_unsupported_by_serverless = concat(
     [for k, e in var.endpoints : "${k} (SAP ASE is not supported by DMS Serverless)" if e.engine == "sybase"],
     [for k, e in var.endpoints : "${k} (Db2 is a source only on DMS Serverless)" if contains(["db2", "db2-zos"], e.engine) ? e.role == "target" : false],
     [for k, e in var.endpoints : "${k} (DMS Serverless does not support SSL on Db2 endpoints)" if contains(["db2", "db2-zos"], e.engine) ? e.ssl_mode != "none" : false],
   )
 
-  # -------------------------------------------------------------------------
-  # Endpoints
-  # -------------------------------------------------------------------------
-
-  # Endpoints DMS reads a secret for. An empty secret_access_role_arn means we
-  # make the role, scoped to that one secret.
   endpoints_with_secret = {
     for k, e in var.endpoints : k => e
-    if e.secret_arn != "" && e.secret_access_role_arn == ""
+    if e.username == "" && e.create_secret_role
   }
 
-  # S3 targets DMS writes through a role. Same deal: supply one or get one
-  # scoped to the bucket and prefix.
   s3_targets_needing_role = {
-    for k, s in var.s3_targets : k => s if s.service_access_role_arn == ""
+    for k, s in var.s3_targets : k => s if s.create_role
   }
 
   endpoint_secret_role_arns = {
     for k, e in var.endpoints : k => (
-      e.secret_access_role_arn != ""
-      ? e.secret_access_role_arn
-      : try(aws_iam_role.endpoint_secret[k].arn, "")
+      e.create_secret_role ? try(aws_iam_role.endpoint_secret[k].arn, "") : e.secret_access_role_arn
     )
-    if e.secret_arn != ""
+    if e.username == ""
   }
 
   s3_target_role_arns = {
     for k, s in var.s3_targets : k => (
-      s.service_access_role_arn != ""
-      ? s.service_access_role_arn
-      : try(aws_iam_role.s3_target[k].arn, "")
+      s.create_role ? try(aws_iam_role.s3_target[k].arn, "") : s.service_access_role_arn
     )
   }
 
-  # Tasks address every endpoint by the same key space, so the two maps must not
-  # collide - checked on the replication instance.
-  # A module-created certificate is addressed by key, because feeding this
-  # module's own output back into its input would be a cycle.
   endpoint_certificate_arns = {
     for k, e in var.endpoints : k => (
       e.certificate_key != ""
@@ -83,9 +66,6 @@ locals {
     )
   }
 
-  # Eight hex characters of the content digest, part of the certificate id so
-  # a rotated CA is a new certificate rather than an in-place replacement.
-  # Callers often pass certificates as sensitive; the digest is not.
   certificate_digests = {
     for k, c in var.certificates : k => substr(sha256("${try(nonsensitive(c.pem), c.pem)}${try(nonsensitive(c.wallet), c.wallet)}"), 0, 8)
   }
@@ -102,10 +82,6 @@ locals {
     if length([for j in local.endpoint_keys : j if j == k]) > 1
   ]
 
-  # -------------------------------------------------------------------------
-  # Security posture, computed once and reused by preconditions and outputs
-  # -------------------------------------------------------------------------
-
   plaintext_endpoints = [
     for k, e in var.endpoints : k if e.username != "" || e.password != ""
   ]
@@ -114,9 +90,6 @@ locals {
     for k, e in var.endpoints : k if contains(["none", "require"], e.ssl_mode)
   ]
 
-  # Oracle verifies against a wallet; a PEM-only certificate is the usual slip.
-  # Endpoint keys only, but computed from certificates, which a caller often
-  # passes as sensitive: unwrapped so the check can name them.
   oracle_endpoints_with_pem = try(nonsensitive(local.oracle_endpoints_with_pem_raw), local.oracle_endpoints_with_pem_raw)
   oracle_endpoints_with_pem_raw = [
     for k, e in var.endpoints : k
@@ -127,8 +100,6 @@ locals {
     for k, e in var.endpoints : k if e.ssl_mode == "none"
   ]
 
-  # An endpoint with no key of its own falls back to the instance key, which
-  # falls back to the AWS-managed DMS key.
   endpoints_without_cmk = [
     for k, e in var.endpoints : k
     if e.kms_key_arn == "" && var.kms_key_arn == ""
@@ -139,10 +110,6 @@ locals {
     if s.encryption_mode != "SSE_KMS" || s.kms_key_arn == ""
   ]
 
-  # Read from the MERGED settings, never from the typed input. raw_overrides is
-  # merged over the base, so a gate that reads var.tasks[*].settings reports a
-  # posture the task does not have - and governance then certifies it. That is
-  # worse than having no gate, because it manufactures audit evidence.
   destructive_tasks = [
     for k, t in var.tasks : k
     if contains(["DROP_AND_CREATE", "TRUNCATE_BEFORE_LOAD"],
@@ -154,8 +121,6 @@ locals {
     if !try(local.task_settings_merged[k].ValidationSettings.EnableValidation, true)
   ]
 
-  # Severity per task, from the MERGED settings: raw_overrides replaces
-  # LogComponents wholesale, so the typed log_level is not what DMS runs with.
   task_log_severities = {
     for k, t in var.tasks : k => distinct([
       for c in try(local.task_settings_merged[k].Logging.LogComponents, []) : try(c.Severity, "LOGGER_SEVERITY_DEFAULT")
@@ -167,8 +132,6 @@ locals {
     if length(setintersection(toset(sev), toset(["LOGGER_SEVERITY_DEBUG", "LOGGER_SEVERITY_DETAILED_DEBUG"]))) > 0
   ]
 
-  # Task IDs DMS uses in CloudWatch: the resource ID at the end of the task
-  # ARN, not the task name.
   task_resource_ids = {
     for k, t in aws_dms_replication_task.this : k => element(split(":", t.replication_task_arn), 6)
   }
@@ -178,31 +141,25 @@ locals {
     if !try(local.task_settings_merged[k].Logging.EnableLogging, true)
   ]
 
-  # Surfaced so a reviewer can see where DMS writes its exception rows, which
-  # contain source data. Empty means the target's default schema.
   tasks_with_default_control_schema = [
     for k, t in var.tasks : k
     if try(local.task_settings_merged[k].ControlTablesSettings.ControlSchema, "") == ""
   ]
 
-  # LIMITED silently truncates past LobMaxSize. In a banking record that is a
-  # data defect nobody sees until a report disagrees with the source.
   tasks_with_truncating_lob_mode = [
     for k, t in var.tasks : k
     if try(local.task_settings_merged[k].TargetMetadata.LimitedSizeLobMode, false)
   ]
 
-  # DMS does not support full LOB mode for an S3 target (INLINE is full LOB
-  # mode with a threshold). Read from the merged settings.
-  # "BatchApply is not supported for an S3 endpoint ... might result in loss of
-  # data" (DMS S3 target documentation).
+  # S3 targets support neither full LOB mode nor BatchApply.
+  # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Target.S3.html
   tasks_with_batch_apply_to_s3 = [
     for k, t in var.tasks : k
     if contains(keys(var.s3_targets), t.target_endpoint) && try(local.task_settings_merged[k].TargetMetadata.BatchApplyEnabled, false)
   ]
 
-  # S3 target validation runs Athena queries as the principal that created the
-  # task - the Terraform role here, not the endpoint's role.
+  # S3 target validation runs Athena queries with the permissions of whoever created the task.
+  # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating_S3.html
   tasks_validating_s3 = [
     for k, t in var.tasks : k
     if contains(keys(var.s3_targets), t.target_endpoint) && try(local.task_settings_merged[k].ValidationSettings.EnableValidation, false)
@@ -213,20 +170,13 @@ locals {
     if contains(keys(var.s3_targets), t.target_endpoint) && try(local.task_settings_merged[k].TargetMetadata.FullLobMode, false)
   ]
 
-  # -------------------------------------------------------------------------
-  # Data validation
-  #
-  # DMS validates only these engines (DMS user guide, "AWS DMS data
-  # validation"); anywhere else EnableValidation = true is accepted and does
-  # nothing, so a governance field that trusted the flag would certify a
-  # reconciliation that never happens.
-  # -------------------------------------------------------------------------
-
+  # The engines DMS data validation supports.
+  # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html
   validation_source_engines = ["oracle", "postgres", "aurora-postgresql", "mysql", "mariadb", "aurora", "sqlserver", "db2"]
   validation_target_engines = concat(local.validation_source_engines, ["redshift"])
 
-  # An S3 target validates only from parquet, with a timestamp column and a
-  # date partition that has a day component.
+  # S3 target validation needs parquet, a timestamp column and a date partition with a day.
+  # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating_S3.html
   s3_targets_validatable = {
     for k, s in var.s3_targets : k => (
       s.data_format == "parquet" && s.timestamp_column_name != "" && s.date_partition_enabled && strcontains(s.date_partition_sequence, "DD")
@@ -245,8 +195,6 @@ locals {
 
   tasks_whose_validation_cannot_run = [
     for k, t in var.tasks : k
-    # A task naming a missing endpoint, or one in the wrong direction, is
-    # refused on its own; it is not also reported here.
     if contains(concat(local.tasks_with_unknown_endpoints, local.tasks_with_wrong_direction), k) ? false : (try(local.task_settings_merged[k].ValidationSettings.EnableValidation, false) ? !local.task_validation_feasible[k] : false)
   ]
 
@@ -256,8 +204,6 @@ locals {
     [for k, v in var.validation_tasks : "${k} (same key as a task)" if contains(keys(var.tasks), k)],
   )
 
-  # The parent's merged settings, made safe and turned into a validator: it
-  # never prepares the target, whatever the parent does to it.
   validation_task_settings_json = {
     for k, v in var.validation_tasks : k => jsonencode(merge(try(local.task_settings_merged[v.task], {}), {
       FullLoadSettings = merge(try(local.task_settings_merged[v.task].FullLoadSettings, {}), {
@@ -273,16 +219,11 @@ locals {
     }))
   }
 
-  # A task referring to an endpoint key that does not exist. Terraform would
-  # otherwise report this as a confusing map lookup failure.
   tasks_with_unknown_endpoints = [
     for k, t in var.tasks : k
     if !contains(local.endpoint_keys, t.source_endpoint) || !contains(local.endpoint_keys, t.target_endpoint)
   ]
 
-  # Direction has to line up: a task cannot read from a target-role endpoint.
-  # An s3_targets key is not in var.endpoints, so try() would fall back to
-  # "source" and wave it through - an S3 endpoint is target-only by construction.
   tasks_with_wrong_direction = [
     for k, t in var.tasks : k
     if contains(keys(var.s3_targets), t.source_endpoint) ||
@@ -290,21 +231,6 @@ locals {
     try(var.endpoints[t.target_endpoint].role, "target") != "target"
   ]
 
-  # -------------------------------------------------------------------------
-  # Task settings
-  #
-  # DMS accepts this as JSON and ignores keys it does not recognise, without
-  # error. So it is built here from typed inputs rather than handed over as a
-  # string, and anything merged on top goes through tests/lint_task_settings.py.
-  # -------------------------------------------------------------------------
-
-  # The components worth having in the log. Everything else is noise until you
-  # are debugging, and DEBUG on all of them fills a log group fast.
-  #
-  # VALIDATOR_EXT, not VALIDATOR: it is the id DMS stores and returns (AWS
-  # "Saving task settings" example; the provider's acceptance-test settings
-  # round-trip it). A component DMS drops would show as a diff on every plan,
-  # and every applied diff stops a running task.
   log_components = ["SOURCE_UNLOAD", "SOURCE_CAPTURE", "TARGET_LOAD", "TARGET_APPLY", "TASK_MANAGER", "VALIDATOR_EXT"]
 
   task_settings_base = {
@@ -312,9 +238,8 @@ locals {
       TargetMetadata = {
         TargetSchema = ""
         SupportLobs  = t.settings.lob_mode != "NONE"
-        # INLINE is FullLobMode plus a threshold: DMS only reads InlineLobMaxSize
-        # when FullLobMode is true. Rendering INLINE with FullLobMode = false
-        # made DMS drop the setting and fall back to default LOB handling.
+        # DMS sends LOBs above InlineLobMaxSize in full LOB mode, so INLINE sets FullLobMode.
+        # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.TargetMetadata.html
         FullLobMode              = contains(["FULL", "INLINE"], t.settings.lob_mode)
         LobChunkSize             = t.settings.lob_chunk_size_kb
         LimitedSizeLobMode       = t.settings.lob_mode == "LIMITED"
@@ -355,13 +280,6 @@ locals {
         HistoryTableEnabled         = true
       }
 
-      # Validation is the audit evidence that the target matches the source, so
-      # the knobs that decide whether it survives are typed rather than fixed.
-      #
-      # HandleCollationDiff matters on Oracle -> PostgreSQL specifically: if the
-      # target's primary-key collation is not "C", sort order differs, validation
-      # reports false mismatches, and at FailureMaxCount it SUSPENDS itself. The
-      # evidence then quietly does not exist.
       ValidationSettings = merge(
         {
           EnableValidation     = t.settings.validation_enabled
@@ -371,37 +289,31 @@ locals {
           HandleCollationDiff  = t.settings.handle_collation_diff
           ValidationOnly       = false
         },
-        # Omitted unless asked for: from engine 3.5.4 DMS picks GROUP_LEVEL
-        # itself on supported paths, and hardcoding ROW_LEVEL overrides that.
+        # From engine 3.5.4 DMS sets ValidationMode to GROUP_LEVEL on supported paths.
+        # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.DataValidation.html
         t.settings.validation_mode != "" ? { ValidationMode = t.settings.validation_mode } : {},
       )
 
-      # With batch apply on, a data or apply error under LOG_ERROR switches the
-      # task to one-by-one apply for the rest of its life - CDC latency climbs
-      # and nothing fails. SUSPEND_TABLE confines the damage to the one table,
-      # as the DMS TargetMetadata documentation recommends.
+      # With batch apply, a data error under the default policies switches the task to one-by-one apply.
+      # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.TargetMetadata.html
       ErrorBehavior = {
-        DataErrorPolicy               = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "LOG_ERROR"
-        DataTruncationErrorPolicy     = "LOG_ERROR"
-        DataErrorEscalationPolicy     = "SUSPEND_TABLE"
-        DataErrorEscalationCount      = 0
-        TableErrorPolicy              = "SUSPEND_TABLE"
-        TableErrorEscalationPolicy    = "STOP_TASK"
-        TableErrorEscalationCount     = t.settings.table_error_max
-        RecoverableErrorCount         = -1
-        RecoverableErrorInterval      = 5
-        RecoverableErrorThrottling    = true
-        RecoverableErrorThrottlingMax = 1800
-        ApplyErrorDeletePolicy        = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "IGNORE_RECORD"
-        ApplyErrorInsertPolicy        = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "LOG_ERROR"
-        ApplyErrorUpdatePolicy        = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "LOG_ERROR"
-        # apply_error_max only means something with a policy that acts on it:
-        # under LOG_ERROR reaching the count changes nothing.
-        ApplyErrorEscalationPolicy = t.settings.apply_error_max > 0 ? "STOP_TASK" : "LOG_ERROR"
-        ApplyErrorEscalationCount  = t.settings.apply_error_max
-        FullLoadIgnoreConflicts    = true
-        # The runtime half of the "selection rule matched nothing" trap: without
-        # this the task starts, captures no tables, and reports success.
+        DataErrorPolicy                      = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "LOG_ERROR"
+        DataTruncationErrorPolicy            = "LOG_ERROR"
+        DataErrorEscalationPolicy            = "SUSPEND_TABLE"
+        DataErrorEscalationCount             = 0
+        TableErrorPolicy                     = "SUSPEND_TABLE"
+        TableErrorEscalationPolicy           = "STOP_TASK"
+        TableErrorEscalationCount            = t.settings.table_error_max
+        RecoverableErrorCount                = -1
+        RecoverableErrorInterval             = 5
+        RecoverableErrorThrottling           = true
+        RecoverableErrorThrottlingMax        = 1800
+        ApplyErrorDeletePolicy               = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "IGNORE_RECORD"
+        ApplyErrorInsertPolicy               = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "LOG_ERROR"
+        ApplyErrorUpdatePolicy               = t.settings.batch_apply_enabled ? "SUSPEND_TABLE" : "LOG_ERROR"
+        ApplyErrorEscalationPolicy           = t.settings.apply_error_max > 0 ? "STOP_TASK" : "LOG_ERROR"
+        ApplyErrorEscalationCount            = t.settings.apply_error_max
+        FullLoadIgnoreConflicts              = true
         FailOnNoTablesCaptured               = true
         FailOnTransactionConsistencyBreached = t.settings.fail_on_open_transaction
       }
@@ -418,13 +330,7 @@ locals {
     for k, t in var.tasks : k => jsondecode(t.settings.raw_overrides)
   }
 
-  # Every task-settings section and key the DMS user guide documents
-  # ("Specifying task settings", one page per section). DMS ignores anything
-  # else without a word, so raw_overrides is checked against this list at plan
-  # (check raw_overrides_use_known_task_settings). An empty list means the
-  # section's content is free-form (a list, a scalar, or undocumented keys).
-  # tests/lint_task_settings.py carries the same list and fails when the two
-  # drift - edit both, between the begin/end markers.
+  # tests/lint_task_settings.py reads the lists between these markers and fails when they drift from its own.
   # known_task_settings:begin
   known_task_settings = {
     TargetMetadata = [
@@ -489,16 +395,7 @@ locals {
   }
   # known_task_settings:end
 
-  # -------------------------------------------------------------------------
-  # Table mappings
-  #
-  # DMS rejects a malformed rule at task creation - after the plan was approved
-  # - and applies some well-formed ones to nothing. The values below are the
-  # DMS table-mapping documentation (selection, transformation and
-  # table-settings rules); tests/lint_task_settings.py carries the same lists
-  # and fails when they drift.
-  # -------------------------------------------------------------------------
-
+  # tests/lint_task_settings.py reads the lists between these markers and fails when they drift from its own.
   # known_mapping_rules:begin
   known_mapping_rules = {
     rule_types        = ["selection", "transformation", "table-settings", "object-mapping"]
@@ -520,12 +417,7 @@ locals {
   }
   # known_mapping_rules:end
 
-  # The rules of every task, as objects only. Anything the validations on
-  # var.tasks already refuse (not JSON, no rules array) comes out empty here so
-  # nothing below can throw. try(), not a conditional: rules of different
-  # shapes are a tuple with no single element type, and a conditional would
-  # demand one. Every string field is read null-safe: a missing or null value
-  # is "", and the rule is judged on that.
+  # try(), not a conditional: a conditional converts rules of different shapes to maps of strings.
   mapping_rules = {
     for k, t in var.tasks : k => [
       for r in try([for r in jsondecode(t.table_mappings).rules : r if can(keys(r))], []) : {
@@ -550,7 +442,6 @@ locals {
     ]
   }
 
-  # Nested ternaries throughout: the floor evaluates both operands of && and ||.
   mapping_problems_all = {
     for k, rules in local.mapping_rules : k => concat(
       [for r in rules : "rule ${r.id}: rule-id must be a numeric value" if !can(regex("^[0-9]+$", r.id))],
@@ -584,9 +475,6 @@ locals {
 
   mapping_problems = { for k, v in local.mapping_problems_all : k => v if length(v) > 0 }
 
-  # Per task, the raw_overrides entries DMS would silently drop: unknown
-  # sections, and unknown keys inside sections whose keys are documented.
-  # Nested ternaries, not || - the floor evaluates both operands.
   tasks_with_unknown_task_settings = {
     for k, t in var.tasks : k => flatten([
       for section, body in local.task_settings_overrides[k] :
@@ -612,9 +500,7 @@ locals {
     ])) > 0
   }
 
-  # Merged one level deep, so overriding a single key inside TargetMetadata does
-  # not discard the rest of the section. merge() throws on a list (LogComponents
-  # is one), and the try() then takes the override wholesale.
+  # merge() fails on a list section such as LogComponents, and try() then takes the override whole.
   task_settings_merged = {
     for k, t in var.tasks : k => {
       for section in distinct(concat(
@@ -632,33 +518,18 @@ locals {
     for k, t in var.tasks : k => jsonencode(local.task_settings_merged[k])
   }
 
-  # -------------------------------------------------------------------------
-  # Premigration assessment
-  # -------------------------------------------------------------------------
-
   assessment_enabled     = local.create && local.provisioned && var.premigration_assessment.enabled
   create_assessment_role = local.assessment_enabled && var.premigration_assessment.create_role
   assessment_role_arn    = var.premigration_assessment.create_role ? try(aws_iam_role.assessment[0].arn, "") : var.premigration_assessment.role_arn
   assessment_encryption  = var.premigration_assessment.kms_key_arn != "" ? "SSE_KMS" : "SSE_S3"
 
-  # -------------------------------------------------------------------------
-  # Naming
-  # -------------------------------------------------------------------------
-
   subnet_group_id = var.name
   instance_id     = var.name
-  # DMS derives this from the replication instance id and creates it on first
-  # task start, with no expiry.
+  # DMS names the task log group dms-tasks-<replication instance identifier>; it cannot be set.
+  # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.Logging.html
   log_group_name = "dms-tasks-${local.instance_id}"
 
   replication_instance_arn = try(aws_dms_replication_instance.this[0].replication_instance_arn, "")
-
-  # -------------------------------------------------------------------------
-  # What the caller's source database has to do before CDC works
-  #
-  # None of this is reachable from Terraform, all of it fails at runtime rather
-  # than at apply, and every engine fails differently. So it is emitted as data.
-  # -------------------------------------------------------------------------
 
   source_engines = distinct([for k, e in var.endpoints : e.engine if e.role == "source"])
 
@@ -755,7 +626,6 @@ locals {
     redshift          = []
   }
 
-  # mariadb and aurora flavours share their upstream engine's requirements.
   engine_alias = {
     mariadb           = "mysql"
     aurora            = "mysql"
@@ -767,39 +637,19 @@ locals {
     engine => lookup(local.engine_prerequisites, lookup(local.engine_alias, engine, engine), [])
   }
 
-  # -------------------------------------------------------------------------
-  # What the target has to have before the load
-  #
-  # DMS has no hook that runs a SQL script; the only in-service hook is
-  # postgres_settings.after_connect_script, per connection. Schema, constraints
-  # and the sequence reset are the pipeline's job. What this
-  # module can do is say, as data, which tasks depend on that having happened.
-  # -------------------------------------------------------------------------
-
-  # DO_NOTHING means DMS creates nothing on the target, so the tables have to
-  # exist already - and if they do not, the task suspends every table rather
-  # than failing outright. Read from the MERGED settings, like every other
-  # governance fact.
   tasks_expecting_a_prebuilt_target = [
     for k, t in var.tasks : k
     if try(local.task_settings_merged[k].FullLoadSettings.TargetTablePrepMode, "DO_NOTHING") == "DO_NOTHING"
   ]
 
-  # A full load into a target whose triggers and foreign keys are live is the
-  # other half of the same problem.
   postgres_targets_without_load_guard = [
     for k, e in var.endpoints : k
     if e.role == "target" && contains(["postgres", "aurora-postgresql"], e.engine)
     && e.postgres.after_connect_script == ""
   ]
 
-  # -------------------------------------------------------------------------
-  # Network prerequisites
-  # -------------------------------------------------------------------------
-
   required_interface_endpoints = concat(
-    # DMS reads the secret itself, from inside your VPC.
-    length([for k, e in var.endpoints : k if e.secret_arn != ""]) > 0 ? ["secretsmanager"] : [],
+    length([for k, e in var.endpoints : k if e.username == ""]) > 0 ? ["secretsmanager"] : [],
     var.kms_key_arn != "" || length([for k, e in var.endpoints : k if e.kms_key_arn != ""]) > 0 ? ["kms"] : [],
     ["logs (for task logging)"],
     var.sns_topic_arn != "" ? ["sns (for event subscriptions)"] : [],

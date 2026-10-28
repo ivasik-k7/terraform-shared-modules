@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.tf          linguist-language=HCL
+*.tftest.hcl  linguist-language=HCL
+*.tftpl       linguist-language=HCL
+
+*.zip binary
+*.pdf binary
+*.png binary
+*.jpg binary

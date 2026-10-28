@@ -1,0 +1,79 @@
+# trivy misconfiguration scan. On a pull request it gates the modules the
+# pull request touches, at HIGH and CRITICAL: legacy modules carry findings,
+# and a gate that fails on code nobody changed is a gate someone switches off.
+# Weekly, it scans every module and reports without failing.
+#
+# Accepted findings live in .trivyignore, each with its reason.
+#
+# setup-trivy is pinned to the commit GHSA-69fq-xp46-6x23 names as safe after
+# the March 2026 tag hijack, and the trivy version is pinned past the
+# malicious 0.69.4-0.69.6 builds. Do not move either to a tag.
+
+name: security
+
+on:
+  pull_request:
+    paths:
+      - "modules/**"
+      - ".trivyignore"
+      - ".github/workflows/security.yml"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trivy:
+    name: trivy config scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: v0.70.0
+
+      - name: Scan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            mapfile -t mods < <(scripts/tf-modules.sh changed "origin/$BASE_REF")
+            exit_code=1
+          else
+            mapfile -t mods < <(scripts/tf-modules.sh list)
+            exit_code=0
+          fi
+          if [ ${#mods[@]} -eq 0 ]; then echo "No module changed."; exit 0; fi
+
+          failed=()
+          for m in "${mods[@]}"; do
+            echo "::group::modules/$m"
+            if ! trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 \
+                   --ignorefile .trivyignore "modules/$m" | tee "$RUNNER_TEMP/$m.txt"; then
+              failed+=("$m")
+            fi
+            echo "::endgroup::"
+          done
+
+          {
+            echo "### trivy: ${#failed[@]} of ${#mods[@]} module(s) with HIGH/CRITICAL findings"
+            for m in "${failed[@]}"; do echo "- \`modules/$m\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::HIGH/CRITICAL findings in: ${failed[*]}. Fix them, or accept each in .trivyignore with a reason."
+            exit "$exit_code"
+          fi

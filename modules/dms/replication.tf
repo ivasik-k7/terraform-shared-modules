@@ -1,5 +1,5 @@
-# The subnet group exists in both compute modes and is the one resource that is
-# always present, so module-wide invariants are checked here.
+# Preconditions run per instance, so a resource with no instances checks nothing.
+# This one exists in every compute mode, so the module-wide checks live here.
 resource "aws_dms_replication_subnet_group" "this" {
   count = local.create ? 1 : 0
 
@@ -11,33 +11,26 @@ resource "aws_dms_replication_subnet_group" "this" {
 
   lifecycle {
     precondition {
-      # Tasks address endpoints and S3 targets through one key space, so a
-      # collision would silently resolve to whichever map won the merge.
       condition     = length(local.duplicate_endpoint_keys) == 0
       error_message = "these keys appear in both endpoints and s3_targets: ${join(", ", local.duplicate_endpoint_keys)}. Tasks look endpoints up by key, so the names have to be unique across both maps."
     }
 
     precondition {
-      # dms-vpc-role, which the subnet group also needs, is looked up by the
-      # account_service_roles_exist check in observability.tf.
       condition     = length(var.subnet_ids) >= 2
       error_message = "DMS needs at least two subnets in different availability zones, even for a single-AZ replication instance."
     }
 
-    # Everything below is a MODULE-WIDE invariant and lives here on purpose.
-    # A precondition on a resource with zero instances never runs, and both
-    # aws_dms_replication_task and aws_dms_endpoint are empty in some valid
-    # configuration - serverless mode and an S3-only migration respectively.
-    # This subnet group is the one resource present in every mode.
+    precondition {
+      condition     = local.notifications_need_topic ? var.sns_topic_arn != "" : true
+      error_message = "create_event_subscriptions or create_alarms is on but sns_topic_arn is empty. Set the topic, or turn both off to run without notifications (check.somebody_hears_a_failed_task then warns)."
+    }
+
     precondition {
       condition     = length(local.tasks_with_unknown_endpoints) == 0
       error_message = "these tasks name an endpoint that does not exist: ${join(", ", local.tasks_with_unknown_endpoints)}. source_endpoint and target_endpoint are keys from endpoints or s3_targets."
     }
 
     precondition {
-      # A precondition rather than a validation on tasks: a validation cannot
-      # read a local derived from the variable it validates, and naming the
-      # task and the rule-id is the whole value of the message.
       condition     = length(local.mapping_problems) == 0
       error_message = "these table mappings have rules DMS would reject at task creation, after the plan was approved, or apply to nothing: ${join("; ", [for k, v in local.mapping_problems : "${k}: ${join(", ", v)}"])}. The values follow the DMS table-mapping documentation for selection, transformation and table-settings rules."
     }
@@ -96,8 +89,6 @@ resource "aws_dms_replication_subnet_group" "this" {
     }
 
     precondition {
-      # aws_dms_replication_config has no CDC start argument: the setting would
-      # be dropped without a word.
       condition = local.serverless ? length([
         for k, t in var.tasks : k if t.cdc_start_time != "" || t.cdc_start_position != ""
       ]) == 0 : true
@@ -105,9 +96,6 @@ resource "aws_dms_replication_subnet_group" "this" {
     }
 
     precondition {
-      # The log group is the one place require_cmk can reach task logs. Without
-      # it DMS creates dms-tasks-<id> itself, with the AWS-managed key and no
-      # expiry.
       condition     = var.require_cmk && local.provisioned ? (var.create_log_group ? var.log_retention_days > 0 : false) : true
       error_message = "require_cmk = true, but the module is not creating the task log group (create_log_group = false or log_retention_days = 0), so DMS would create dms-tasks-${local.instance_id} itself with the AWS-managed key. Let the module create it with a retention."
     }
@@ -124,9 +112,6 @@ resource "aws_dms_replication_subnet_group" "this" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Provisioned: an instance you pay for by the hour until someone deletes it.
-# ---------------------------------------------------------------------------
 resource "aws_dms_replication_instance" "this" {
   count = local.create && local.provisioned ? 1 : 0
 
@@ -146,14 +131,10 @@ resource "aws_dms_replication_instance" "this" {
   vpc_security_group_ids      = var.security_group_ids
   network_type                = var.network_type
 
-  # A public replication instance holds credentials for both databases and
-  # answers from the internet. The gate is in the precondition below.
   publicly_accessible = var.publicly_accessible
 
   preferred_maintenance_window = var.preferred_maintenance_window != "" ? var.preferred_maintenance_window : null
 
-  # Cached changes and unshipped LOBs live on this volume, so it is migrating
-  # data at rest even though nothing is "stored" here.
   kms_key_arn = var.kms_key_arn != "" ? var.kms_key_arn : null
 
   tags = local.common_tags
@@ -170,17 +151,12 @@ resource "aws_dms_replication_instance" "this" {
     }
 
     precondition {
-      # Falls back to AWS's choice otherwise, which can land mid-cutover.
       condition     = var.multi_az ? var.availability_zone == "" : true
       error_message = "availability_zone is only meaningful when multi_az is false; a multi-AZ instance places itself."
     }
   }
 }
 
-# ---------------------------------------------------------------------------
-# Serverless: DMS sizes capacity between the DCU bounds. No instance to forget
-# about, and no per-task resource - one replication config is one migration.
-# ---------------------------------------------------------------------------
 resource "aws_dms_replication_config" "this" {
   for_each = local.create && local.serverless ? var.tasks : {}
 
@@ -219,8 +195,6 @@ resource "aws_dms_replication_config" "this" {
     }
 
     precondition {
-      # Serverless scales down but never to zero, so an idle CDC replication
-      # bills min_dcu around the clock waiting for changes.
       condition     = var.serverless.min_dcu <= var.serverless.max_dcu
       error_message = "serverless.min_dcu must not exceed serverless.max_dcu."
     }

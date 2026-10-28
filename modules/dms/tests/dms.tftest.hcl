@@ -1,15 +1,4 @@
-# Mocked plan tests.
-#
-# These prove the graph shape, the rendered task settings JSON, the IAM policy
-# documents, every validation and precondition, and the governance and contract
-# outputs.
-#
-# What they cannot prove is that a migration works. DMS failures live at
-# runtime: a source without supplemental logging, a firewall that drops the
-# replication instance's ENI, a task that stops at 3am. output.source_prerequisites
-# and output.network_contract exist because Terraform cannot check any of it -
-# and neither can this file.
-
+# mock_provider reports no replacement and calls no DMS API: settings, policies and hashes are asserted as data.
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -20,8 +9,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -51,9 +38,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -90,7 +74,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -105,15 +88,10 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
-
-# ---------------------------------------------------------------------------
-# Graph shape
-# ---------------------------------------------------------------------------
 
 run "creates_the_expected_resource_set" {
   command = plan
@@ -184,8 +162,6 @@ run "create_false_makes_nothing" {
 run "module_creates_no_network_resources" {
   command = plan
 
-  # BYO network. If a future change adds a security group or an endpoint here,
-  # this fails and the decision becomes explicit.
   assert {
     condition     = length(output.network_contract.required_ingress) > 0
     error_message = "the contract must state what the databases have to allow, since the module cannot open it."
@@ -198,10 +174,6 @@ run "module_creates_no_network_resources" {
     error_message = "the contract must say the replication instance needs a route to both databases - that is the most common first-run failure."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Credentials: the module's headline refusal
-# ---------------------------------------------------------------------------
 
 run "a_plaintext_credential_is_rejected" {
   command = plan
@@ -222,8 +194,6 @@ run "a_plaintext_credential_is_rejected" {
     allow_insecure_transport = true
   }
 
-  # The precondition refuses it, and the advisory check says the same thing in
-  # a plan a reviewer reads. Both have to fire.
   expect_failures = [
     aws_dms_replication_subnet_group.this,
     check.credentials_are_not_in_state,
@@ -257,7 +227,6 @@ run "a_plaintext_credential_is_allowed_when_acknowledged" {
     error_message = "governance must name every endpoint whose credential is sitting in state."
   }
 
-  # Acknowledged is not the same as fine: the warning stays.
   expect_failures = [check.credentials_are_not_in_state]
 }
 
@@ -284,8 +253,6 @@ run "both_credential_paths_at_once_is_rejected" {
 run "a_credential_hidden_in_extra_connection_attributes_is_rejected" {
   command = plan
 
-  # This field is free text passed to the driver, stored in state, and returned
-  # by the API. It is where a password goes when secret_arn feels like work.
   variables {
     endpoints = {
       source-db = {
@@ -338,10 +305,6 @@ run "the_secret_role_is_scoped_to_one_secret_and_trusts_the_regional_principal" 
   }
 }
 
-# ---------------------------------------------------------------------------
-# Transport
-# ---------------------------------------------------------------------------
-
 run "unverified_tls_is_rejected" {
   command = plan
 
@@ -363,8 +326,6 @@ run "unverified_tls_is_rejected" {
 run "verify_full_without_a_certificate_is_rejected" {
   command = plan
 
-  # verify-full with no CA is a setting that reads as strict and verifies
-  # nothing; DMS fails the connection test instead.
   variables {
     certificates = {}
     endpoints = {
@@ -401,26 +362,13 @@ run "a_certificate_key_must_name_a_real_certificate" {
 }
 
 run "a_module_created_certificate_reaches_the_endpoint" {
-  # apply, not plan: the certificate ARN is computed, and only the mocked apply
-  # fills it in.
   command = apply
 
-  # Referencing the module's own certificate output from its input would be a
-  # cycle, which is why endpoints take a key and the module resolves it.
-  # The exact mock ARN, not != "": a failed lookup renders null, and null != ""
-  # is true, so the weaker form passed precisely in the failure it names.
   assert {
     condition     = aws_dms_endpoint.this["source-db"].certificate_arn == "arn:aws:dms:eu-west-1:111122223333:cert:MOCKCERT"
     error_message = "an endpoint with certificate_key must receive the created certificate's ARN."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Task settings
-#
-# The module renders this JSON instead of taking it as a string, because DMS
-# ignores keys it does not recognise and tells nobody.
-# ---------------------------------------------------------------------------
 
 run "task_settings_are_rendered_with_safe_defaults" {
   command = plan
@@ -457,8 +405,6 @@ run "task_settings_are_rendered_with_safe_defaults" {
 run "lob_mode_renders_the_matching_pair_of_flags" {
   command = plan
 
-  # DMS expresses LOB handling through several flags that have to agree. FULL
-  # with LimitedSizeLobMode left on is accepted and the behaviour is undefined.
   variables {
     tasks = {
       app = {
@@ -484,8 +430,6 @@ run "lob_mode_renders_the_matching_pair_of_flags" {
 run "raw_overrides_merge_one_level_deep" {
   command = plan
 
-  # A shallow merge would replace the whole ValidationSettings block and quietly
-  # drop EnableValidation with it.
   variables {
     tasks = {
       app = {
@@ -519,7 +463,6 @@ run "raw_overrides_merge_one_level_deep" {
 run "table_mappings_without_a_selection_rule_are_rejected" {
   command = plan
 
-  # The task would start, match nothing, and report success.
   variables {
     tasks = {
       app = {
@@ -617,8 +560,6 @@ run "a_task_naming_an_endpoint_that_does_not_exist_is_rejected" {
 run "an_endpoint_used_in_the_wrong_direction_is_rejected" {
   command = plan
 
-  # A target-role endpoint as a task's source fails at connection test, ten
-  # minutes into an apply that looked fine.
   variables {
     tasks = {
       app = {
@@ -639,7 +580,6 @@ run "an_endpoint_used_in_the_wrong_direction_is_rejected" {
 run "a_cdc_start_point_on_a_full_load_task_is_rejected" {
   command = plan
 
-  # It would be silently ignored: a full-load task never reads changes.
   variables {
     tasks = {
       app = {
@@ -658,10 +598,6 @@ run "a_cdc_start_point_on_a_full_load_task_is_rejected" {
   ]
 }
 
-# ---------------------------------------------------------------------------
-# Alerting: the failure this module is shaped around
-# ---------------------------------------------------------------------------
-
 run "a_stopped_cdc_task_is_alarmed_on" {
   command = plan
 
@@ -671,8 +607,6 @@ run "a_stopped_cdc_task_is_alarmed_on" {
   }
 
   assert {
-    # The whole point. A stopped task publishes NO datapoints, so the default
-    # missing-data behaviour leaves the alarm green while the target drifts.
     condition     = aws_cloudwatch_metric_alarm.cdc_latency_target["app"].treat_missing_data == "breaching"
     error_message = "the CDC alarm must treat missing data as breaching: a stopped task stops publishing metrics entirely, and 'no data' is exactly the condition worth paging on."
   }
@@ -710,16 +644,18 @@ run "a_full_load_only_task_gets_no_cdc_alarm" {
   expect_failures = [check.full_load_does_not_leave_the_meter_running]
 }
 
-run "without_a_topic_nothing_is_watching" {
+run "with_notifications_switched_off_nothing_is_watching" {
   command = plan
 
   variables {
-    sns_topic_arn = ""
+    sns_topic_arn              = ""
+    create_alarms              = false
+    create_event_subscriptions = false
   }
 
   assert {
     condition     = length(aws_cloudwatch_metric_alarm.cdc_latency_target) == 0 && length(aws_dms_event_subscription.task) == 0
-    error_message = "with no topic there is nowhere to send an alert, so none are created."
+    error_message = "with notifications off, no alarm or subscription is created."
   }
 
   assert {
@@ -743,10 +679,6 @@ run "the_task_log_group_has_retention" {
     error_message = "left to DMS this log group never expires."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Serverless
-# ---------------------------------------------------------------------------
 
 run "serverless_mode_swaps_the_compute_not_the_inputs" {
   command = plan
@@ -785,20 +717,12 @@ run "serverless_mode_swaps_the_compute_not_the_inputs" {
     error_message = "governance must admit that this module watches nothing in serverless mode."
   }
 
-  # The module creates no alarms, no event subscriptions and no log group here,
-  # and says so rather than letting an SNS topic imply coverage.
   expect_failures = [check.serverless_replication_is_not_watched_by_this_module]
 }
-
-# ---------------------------------------------------------------------------
-# Contracts the caller has to satisfy
-# ---------------------------------------------------------------------------
 
 run "postgres_source_prerequisites_are_emitted" {
   command = plan
 
-  # None of this is reachable from Terraform, and every one of them fails at
-  # runtime rather than at apply.
   assert {
     condition     = length(output.source_prerequisites["postgres"]) >= 3
     error_message = "a PostgreSQL source has prerequisites - logical WAL, the replication role, and the slot - and they have to be handed to whoever owns the database."
@@ -823,8 +747,6 @@ run "oracle_source_prerequisites_name_supplemental_logging" {
   command = plan
 
   variables {
-    # Oracle verifies TLS with verify-ca against an Oracle wallet; DMS does not
-    # support verify-full for Oracle.
     certificates = {
       rds-ca        = { pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----" }
       oracle-wallet = { wallet = "b3JhY2xlLXdhbGxldA==" }
@@ -867,7 +789,6 @@ run "oracle_source_prerequisites_name_supplemental_logging" {
 run "aurora_flavours_inherit_the_upstream_engines_prerequisites" {
   command = plan
 
-  # aurora-postgresql is a target here, so only the source engine appears.
   assert {
     condition     = contains(keys(output.source_prerequisites), "postgres")
     error_message = "prerequisites are keyed by source engine."
@@ -902,10 +823,6 @@ run "the_account_roles_can_be_created_for_a_greenfield_account" {
     error_message = "the role name is fixed by DMS; a prefixed name does not work."
   }
 }
-
-# ---------------------------------------------------------------------------
-# S3 targets
-# ---------------------------------------------------------------------------
 
 run "an_s3_target_role_is_scoped_to_the_prefix" {
   command = plan
@@ -953,10 +870,6 @@ run "endpoint_keys_must_not_collide_across_the_two_maps" {
 
   expect_failures = [aws_dms_replication_subnet_group.this]
 }
-
-# ---------------------------------------------------------------------------
-# Compute posture
-# ---------------------------------------------------------------------------
 
 run "a_public_replication_instance_is_rejected" {
   command = plan
@@ -1006,9 +919,6 @@ run "require_cmk_refuses_the_aws_managed_key" {
     require_cmk = true
   }
 
-  # All three: the instance's storage key, every endpoint's key, and the task
-  # log group - which at DEBUG severity holds row data. require_cmk means all
-  # of them.
   expect_failures = [
     aws_dms_replication_instance.this,
     aws_dms_endpoint.this,
@@ -1016,20 +926,9 @@ run "require_cmk_refuses_the_aws_managed_key" {
   ]
 }
 
-# ---------------------------------------------------------------------------
-# Audit regressions
-#
-# One run per finding. Each of these passed - or did not exist - while the
-# thing it names was broken.
-# ---------------------------------------------------------------------------
-
 run "regression_raw_overrides_cannot_hide_from_the_gates" {
   command = plan
 
-  # The whole premise is that task settings are typed so a security-relevant key
-  # cannot be silently wrong. raw_overrides is merged OVER the typed base, and
-  # every gate used to read the typed input - so an override disabled validation
-  # and logging, enabled DROP_AND_CREATE, and governance reported it all clean.
   variables {
     allow_destructive_target_prep = true
     tasks = {
@@ -1068,7 +967,6 @@ run "regression_raw_overrides_cannot_hide_from_the_gates" {
     error_message = "a reviewer has to be able to see which tasks carry a raw override at all."
   }
 
-  # And the advisory checks have to fire on the merged result too.
   expect_failures = [
     check.cdc_tasks_are_validated,
     check.tasks_write_logs,
@@ -1078,7 +976,6 @@ run "regression_raw_overrides_cannot_hide_from_the_gates" {
 run "regression_an_override_cannot_defeat_the_destructive_prep_gate" {
   command = plan
 
-  # Same shape, but without the acknowledgement. The hard gate must refuse it.
   variables {
     tasks = {
       app = {
@@ -1099,12 +996,6 @@ run "regression_an_override_cannot_defeat_the_destructive_prep_gate" {
 run "regression_serverless_enforces_the_same_invariants" {
   command = plan
 
-  # These preconditions used to live on aws_dms_replication_task, which has zero
-  # instances in serverless mode - so a precondition on it never ran, and
-  # allow_destructive_target_prep protected nothing there.
-  # source-db, not target-db: with the wrong direction the direction gate
-  # would refuse this on its own and the destructive gate could be deleted
-  # without this run noticing.
   variables {
     compute_mode = "serverless"
     tasks = {
@@ -1118,7 +1009,6 @@ run "regression_serverless_enforces_the_same_invariants" {
     }
   }
 
-  # Serverless also warns that this module watches nothing there.
   expect_failures = [
     aws_dms_replication_subnet_group.this,
     check.serverless_replication_is_not_watched_by_this_module,
@@ -1128,9 +1018,6 @@ run "regression_serverless_enforces_the_same_invariants" {
 run "regression_inline_lob_mode_renders_a_setting_dms_reads" {
   command = plan
 
-  # DMS only reads InlineLobMaxSize when FullLobMode is true. Rendering INLINE
-  # with FullLobMode = false made DMS drop the setting and silently fall back to
-  # default LOB handling - the exact trap this module exists to prevent.
   variables {
     tasks = {
       app = {
@@ -1165,9 +1052,6 @@ run "regression_inline_lob_mode_renders_a_setting_dms_reads" {
 run "regression_an_s3_target_cannot_be_a_task_source" {
   command = plan
 
-  # An s3_targets key is absent from var.endpoints, so the direction guard's
-  # try() fell back to "source" and waved it through. An S3 endpoint is
-  # target-only by construction.
   variables {
     s3_targets = {
       lake = {
@@ -1191,19 +1075,38 @@ run "regression_an_s3_target_cannot_be_a_task_source" {
   ]
 }
 
+run "notifications_switched_on_without_a_topic_are_refused" {
+  command = plan
+
+  variables {
+    sns_topic_arn = ""
+  }
+
+  expect_failures = [aws_dms_replication_subnet_group.this]
+}
+
+run "regression_a_postgres_target_gets_a_file_size_dms_can_load" {
+  command = plan
+
+  assert {
+    condition     = aws_dms_endpoint.this["target-db"].postgres_settings[0].max_file_size == 32768
+    error_message = "a PostgreSQL target must be sent DMS's default max_file_size, not the provider's 0."
+  }
+
+  assert {
+    condition     = aws_dms_endpoint.this["source-db"].postgres_settings[0].max_file_size == null
+    error_message = "max_file_size is a target setting and must not reach a source."
+  }
+}
+
 run "regression_postgres_cdc_settings_do_not_reach_a_target" {
   command = plan
 
-  # heartbeat_*, slot_name and capture_ddls are source-CDC settings. Applied to
-  # a target, DMS tries to create a heartbeat table in the database you are
-  # migrating INTO. Both shipped examples used an aurora-postgresql target.
   assert {
     condition     = length(aws_dms_endpoint.this["source-db"].postgres_settings) == 1
     error_message = "a postgres SOURCE must still get its CDC settings."
   }
 
-  # A target now gets a postgres block too - but only the fields that mean
-  # something on a target. The defect was source-only CDC settings reaching it.
   assert {
     condition     = aws_dms_endpoint.this["target-db"].postgres_settings[0].heartbeat_enable == null
     error_message = "a postgres TARGET must not receive heartbeat settings: DMS would try to create a heartbeat table in the database you are migrating into."
@@ -1228,8 +1131,6 @@ run "regression_postgres_cdc_settings_do_not_reach_a_target" {
 run "regression_raw_overrides_must_be_an_object" {
   command = plan
 
-  # "[]" is valid JSON and cannot be merged. Without this the plan died inside
-  # locals on keys(), naming neither the task nor the field.
   variables {
     tasks = {
       app = {
@@ -1248,9 +1149,6 @@ run "regression_raw_overrides_must_be_an_object" {
 run "regression_create_false_silences_the_advisory_checks" {
   command = plan
 
-  # Checks are module-level and used to evaluate even with create = false, so a
-  # switched-off module reported eight advisory failures on a config that
-  # creates nothing.
   variables {
     create                      = false
     allow_plaintext_credentials = true
@@ -1289,8 +1187,6 @@ run "regression_the_s3_role_trust_is_scoped_to_dms_endpoints" {
     tasks = {}
   }
 
-  # SourceAccount alone let any DMS endpoint in the account assume this role -
-  # and dms:CreateEndpoint is a far more common grant than iam:PassRole.
   assert {
     condition = alltrue([
       for s in jsondecode(aws_iam_role.s3_target["lake"].assume_role_policy).Statement :
@@ -1303,9 +1199,6 @@ run "regression_the_s3_role_trust_is_scoped_to_dms_endpoints" {
 run "regression_validation_survives_an_oracle_to_postgres_collation_difference" {
   command = plan
 
-  # With a non-C primary-key collation on the target, Oracle -> PostgreSQL
-  # validation reports false mismatches and suspends itself once it has enough
-  # of them. The evidence the change record depends on then does not exist.
   assert {
     condition     = jsondecode(output.task_settings_json["app"]).ValidationSettings.HandleCollationDiff
     error_message = "HandleCollationDiff must default true: it is what stops Oracle -> PostgreSQL validation suspending itself on a collation difference."
@@ -1346,13 +1239,6 @@ run "regression_the_network_contract_covers_a_hybrid_isolated_vpc" {
     error_message = "endpoints whose necessity cannot be determined from configuration must be listed as such, not asserted."
   }
 }
-
-# ---------------------------------------------------------------------------
-# What the target has to have before the load
-#
-# DMS owns the middle phase only. The module runs no SQL; it reports, as data,
-# which tasks depend on a schema that something else has to have built.
-# ---------------------------------------------------------------------------
 
 run "tasks_that_need_a_prebuilt_target_are_listed_for_the_pipeline" {
   command = plan
@@ -1409,7 +1295,6 @@ run "a_postgres_target_with_live_constraints_is_flagged" {
         secret_kms_key_arn = "arn:aws:kms:eu-west-1:111122223333:key/11111111-2222-3333-4444-555555555555"
         ssl_mode           = "verify-full"
         certificate_key    = "rds-ca"
-        # no after_connect_script
       }
     }
   }

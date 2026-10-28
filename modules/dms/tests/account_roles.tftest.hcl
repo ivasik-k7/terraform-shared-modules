@@ -1,7 +1,3 @@
-# An account without dms-cloudwatch-logs-role: everything applies, the task
-# runs, and its log group stays empty. A check scoped data source cannot be
-# overridden from a run block, so the missing role lives in this file's mock.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -12,7 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # dms-cloudwatch-logs-role is missing: tasks would run with no logs.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role"] }
   }
@@ -42,9 +37,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -81,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -96,13 +87,10 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
-
-
 
 run "a_missing_logs_role_warns" {
   command = plan
