@@ -16,17 +16,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Secret Detection
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
 
       # Runs FIRST, on purpose. Every path this workflow references must be
       # tracked in git, because an untracked path does not exist on a fresh
@@ -134,10 +134,10 @@ jobs:
         module: [agent-warden, agent-warden-2, appconfig, aurora, wafv2, dynamodb, ci-oidc, aws-backup, gitlab-runner, gitlab-runner-fargate, bastion-isolated, ebs, ecr, ecs-orchestrator, ecs-service-connect, efs, eks, lb, asg-group, route53, sm, sns, sqs, tfe-hub]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ matrix.terraform }}
 
@@ -158,7 +158,7 @@ jobs:
 
       - name: Setup TFLint
         if: matrix.terraform == 'latest'
-        uses: terraform-linters/setup-tflint@v4
+        uses: terraform-linters/setup-tflint@v6
         with:
           tflint_version: v0.55.0
 
@@ -174,10 +174,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
 
       # Includes modules/*/examples/** - an in-module quick-start that cannot
       # plan is the worst possible first impression, and nothing caught it before.
@@ -223,16 +223,16 @@ jobs:
         example: [lb, lb-network]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_INTEGRATION_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
 
       - name: Apply then destroy
         working-directory: examples/${{ matrix.example }}
@@ -255,16 +255,16 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_INTEGRATION_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
 
       - name: Apply, verify the runner registers, destroy
         working-directory: modules/gitlab-runner/examples/simple
@@ -320,7 +320,7 @@ jobs:
   #   if: github.event_name == 'push'
   #   steps:
   #     - name: Checkout
-  #       uses: actions/checkout@v4
+  #       uses: actions/checkout@v7
 
   #     - name: Render terraform docs
   #       uses: terraform-docs/gh-actions@v1.1.0
@@ -337,7 +337,7 @@ jobs:
   #   runs-on: ubuntu-latest
   #   steps:
   #     - name: Checkout
-  #       uses: actions/checkout@v4
+  #       uses: actions/checkout@v7
 
   #     - name: Infracost Setup
   #       uses: infracost/infracost-actions/setup@v3
@@ -372,12 +372,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
 
       # Render config.toml + the bootstrap script offline (create=false, no creds)
       # and PARSE them. terraform test can only match substrings, and a TOML key
