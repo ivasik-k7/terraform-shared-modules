@@ -1,22 +1,3 @@
-# Task settings: the rendered JSON and what raw_overrides may add to it.
-#
-# The fixtures under tests/fixtures are what tests/lint_task_settings.py checks
-# the rendered settings against. They are only evidence if they ARE what the
-# module renders, so each one is compared, key for key, with the live output
-# here. A change to the rendering fails this file until the fixture is updated;
-# a fixture edited by hand fails it until the rendering agrees.
-#
-# raw_overrides is the one place a task setting can be misspelled, and DMS
-# drops an unknown key without a word - so the module warns at plan.
-
-# The fixes that the mocked suite could not see on its own, because each one
-# is about how AWS behaves rather than how the graph is shaped: SSL modes per
-# engine, the database name on the secret path, the IAM trust condition, the
-# task dimension CloudWatch publishes under, logging posture from the merged
-# settings, and the configurations DMS refuses at apply.
-#
-# Plan runs first; the apply runs at the end need the task ARN.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -27,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -94,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -109,17 +87,10 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
-
-
-# ---------------------------------------------------------------------------
-# SSL modes DMS supports per engine
-# ---------------------------------------------------------------------------
-
 
 run "the_limited_lob_fixture_is_what_the_module_renders" {
   command = plan
@@ -205,10 +176,6 @@ run "the_none_lob_fixture_is_what_the_module_renders" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# raw_overrides against the documented keys
-# ---------------------------------------------------------------------------
-
 run "a_misspelled_raw_override_key_warns" {
   command = plan
 
@@ -255,8 +222,6 @@ run "an_unknown_raw_override_section_warns" {
   }
 }
 
-# Documented keys the module does not type must pass without a sound, or the
-# check is a tax on legitimate use rather than a trap for typos.
 run "documented_but_untyped_settings_pass_silently" {
   command = plan
 
@@ -315,12 +280,6 @@ run "an_acknowledged_unknown_key_is_quiet_and_listed" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Table mappings against the DMS documentation. Each failing mapping is valid
-# JSON with a rules array, a selection rule and unique rule-ids, so the only
-# thing that can refuse it is the mapping gate on the subnet group.
-# ---------------------------------------------------------------------------
-
 run "every_documented_mapping_rule_shape_passes" {
   command = plan
 
@@ -356,7 +315,6 @@ run "an_unknown_rule_type_is_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "a_non_numeric_rule_id_is_refused" {
@@ -374,7 +332,6 @@ run "a_non_numeric_rule_id_is_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "explicit_with_a_wildcard_is_refused" {
@@ -392,7 +349,6 @@ run "explicit_with_a_wildcard_is_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "a_misspelled_transformation_action_is_refused" {
@@ -410,7 +366,6 @@ run "a_misspelled_transformation_action_is_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "a_column_only_action_on_a_table_is_refused" {
@@ -428,7 +383,6 @@ run "a_column_only_action_on_a_table_is_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "table_settings_with_a_wildcard_are_refused" {
@@ -446,7 +400,6 @@ run "table_settings_with_a_wildcard_are_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "limited_lob_settings_without_a_size_are_refused" {
@@ -464,7 +417,6 @@ run "limited_lob_settings_without_a_size_are_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }
 
 run "an_exclude_only_mapping_is_refused" {
@@ -482,5 +434,4 @@ run "an_exclude_only_mapping_is_refused" {
   }
 
   expect_failures = [aws_dms_replication_subnet_group.this]
-
 }

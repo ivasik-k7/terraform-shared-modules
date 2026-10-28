@@ -1,0 +1,65 @@
+# Fast local guards for staged files. This clone uses core.hooksPath=.githooks,
+# and pre-commit refuses to install over that, so run it explicitly:
+#
+#   make precommit          # staged files
+#   pre-commit run --all-files   # everything; the whitespace fixers will touch legacy files
+#
+# Heavier gates (validate, test, tflint, trivy) are per module: make check.
+# Revisions are commit SHAs (a tag can move), with the version as a comment.
+# Update with `pre-commit autoupdate --freeze`, after a 14-day cooldown.
+
+default_install_hook_types: [pre-commit]
+exclude: '(^|/)\.terraform/|\.terraform\.lock\.hcl$'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+        exclude: ^\.vscode/settings\.json$ # JSONC
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: 80c8033123f6d6b9ccd1a9458562ea4180742af7 # frozen: v1.109.2
+    hooks:
+      - id: terraform_fmt
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+      - id: actionlint
+        name: actionlint (workflows)
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+      # Includes G010: every lint_validations.py copy matches ami-builder's.
+      - id: governance
+        name: module conventions (scripts/check_governance.py)
+        entry: python3 scripts/check_governance.py
+        language: system
+        pass_filenames: false
+        files: ^(modules/|templates/|\.github/(governance-baseline\.json|workflows/terraform-ci\.yaml)|scripts/check_governance\.py)

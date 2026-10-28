@@ -1,9 +1,3 @@
-# The follow-ups from the 2026-10-12 review that were first deferred:
-# notifications that can actually be delivered, serverless failures, account
-# roles for Redshift and DMS Serverless, settings DMS would otherwise ignore
-# (VALIDATOR_EXT, apply_error_max, execute_timeout), S3 targets (batch apply,
-# Glue, validation as the deployer) and the operator steps around alarms.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -14,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -51,9 +43,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -90,7 +79,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -105,18 +93,10 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
-
-
-
-
-# ---------------------------------------------------------------------------
-# Settings DMS would otherwise ignore
-# ---------------------------------------------------------------------------
 
 run "the_validator_logs_under_the_id_dms_keeps" {
   command = plan
@@ -165,10 +145,6 @@ run "execute_timeout_is_dms_default_not_zero" {
     error_message = "the provider sends 0 for an unset execute_timeout; the module must send DMS's own default."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Notifications
-# ---------------------------------------------------------------------------
 
 run "failover_is_notified_by_default" {
   command = plan
@@ -251,10 +227,6 @@ run "serverless_failures_reach_the_topic" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Account roles
-# ---------------------------------------------------------------------------
-
 run "a_redshift_target_needs_its_staging_role" {
   command = plan
 
@@ -286,7 +258,6 @@ run "a_redshift_target_needs_its_staging_role" {
     tasks = {}
   }
 
-  # The mocked account has the two base roles only.
   expect_failures = [check.account_service_roles_exist]
 
   assert {
@@ -334,10 +305,6 @@ run "no_redshift_no_staging_role" {
     error_message = "the Redshift staging role is only for a Redshift target."
   }
 }
-
-# ---------------------------------------------------------------------------
-# S3 targets
-# ---------------------------------------------------------------------------
 
 run "batch_apply_into_s3_is_refused" {
   command = plan
@@ -412,10 +379,6 @@ run "no_s3_validation_no_deployer_requirements" {
     error_message = "nothing extra is needed without S3 validation."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Contracts
-# ---------------------------------------------------------------------------
 
 run "egress_without_a_host_says_so" {
   command = plan

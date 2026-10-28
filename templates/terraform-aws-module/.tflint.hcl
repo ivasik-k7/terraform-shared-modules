@@ -1,0 +1,20 @@
+# tflint --init && tflint --recursive
+# Plugin versions are pinned; Dependabot does not update them, so bump them
+# with the provider range.
+
+config {
+  call_module_type = "local"
+}
+
+plugin "terraform" {
+  enabled = true
+  preset  = "all"
+  version = "0.15.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-terraform"
+}
+
+plugin "aws" {
+  enabled = true
+  version = "0.49.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-aws"
+}

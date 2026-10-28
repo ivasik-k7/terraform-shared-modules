@@ -1,6 +1,3 @@
-# modules/replica: creates what the root module compiled, in the replica
-# region, and refuses a provider in any other region.
-
 mock_provider "aws" {
   mock_data "aws_region" {
     defaults = { name = "eu-west-1" }

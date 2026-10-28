@@ -131,7 +131,7 @@ Replicas for disaster recovery are created by a second, small module; see
 |                      |                                                                                                                                                                                                                                                                                                                   |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Terraform            | >= 1.9.0 (cross-variable validation)                                                                                                                                                                                                                                                                              |
-| AWS provider         | >= 5.73.0, < 6.0.0. 5.73 fixed state wedging on a rejected policy                                                                                                                                                                                                                                                 |
+| AWS provider         | >= 5.73.0, < 7.0.0, tested on 5.100.0 and 6.x. 5.73 fixed state wedging on a rejected policy                                                                                                                                                                                                                      |
 | Providers            | `aws`, nothing else. `modules/replica` takes one provider in the replica region                                                                                                                                                                                                                                   |
 | Workspace role (IAM) | `kms:CreateKey`, `kms:TagResource`, `kms:ListAliases` and, for destroy, `kms:PutKeyPolicy` and `kms:ScheduleKeyDeletion` (the policy is reset to the account default before the key is deleted); `events:PutRule`, `events:PutTargets` with notifications; `iam:GetRole` on itself while the deployer is detected |
 | Deployers            | named in `deployers` for `protect_policy`, `protect_aliases_and_rotation` or `iam_delegation = false`. A detected deployer is the plan's role; with separate HCP Terraform plan and apply roles, list both                                                                                                        |
@@ -240,7 +240,7 @@ a key of their own when that matters.
 
 ## Consumer contracts
 
-Producing modules (aurora, dms, dms-orchestrator, db-script-runner,
+Producing modules (aurora, dms, dms-orchestrator, db-exec,
 ami-builder, gitlab-runner-fargate-v2) emit `kms_key_policy_requirements`, a
 list in which each entry is one need. Contract version 2
 (`output.contract_schema`):
@@ -437,7 +437,7 @@ The [regulated](examples/regulated) example uses all of them.
 | [basic](examples/basic)                     | A workload's key set with purposes, presets, the organization perimeter and notifications                                |
 | [strict](examples/strict)                   | No IAM delegation, separated duties, VPC endpoints, every guardrail                                                      |
 | [regulated](examples/regulated)             | Imported key material, signing-key generations, tenant isolation, algorithm limits, MFA break-glass, compliance snippets |
-| [contract-driven](examples/contract-driven) | Key policies compiled from `db-script-runner`'s requirements, with no statement written by hand                          |
+| [contract-driven](examples/contract-driven) | Key policies compiled from `db-exec`'s requirements, with no statement written by hand                          |
 | [multi-region](examples/multi-region)       | A multi-Region key with a disaster-recovery replica through `modules/replica`, and notifications in both regions         |
 
 ## Most-used inputs
@@ -522,4 +522,4 @@ Semantic versioning, tagged `kms-vX.Y.Z`.
 Every breaking change is marked in the [changelog](CHANGELOG.md), and a
 major release has an upgrade guide ([2.0](docs/UPGRADE-2.0.md)). Supported:
 the latest minor of the current major, on Terraform >= 1.9 and AWS provider
-5.73–5.x. Deprecated inputs stay for one minor release with a warning.
+5.73–6.x. Deprecated inputs stay for one minor release with a warning.

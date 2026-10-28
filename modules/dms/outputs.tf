@@ -73,35 +73,25 @@ output "task_settings_json" {
   value       = local.create ? local.task_settings_json : {}
 }
 
-# ---------------------------------------------------------------------------
-# Governance posture, as data
-# ---------------------------------------------------------------------------
 output "governance" {
   description = "The security and operational posture of this migration, as data rather than prose. Assert on it in tests, or diff it in a change review."
   value = !local.create ? null : {
-    # Credentials and transport
     endpoints_with_plaintext_credentials = local.plaintext_endpoints
     endpoints_without_verified_tls       = local.insecure_endpoints
     endpoints_in_cleartext               = local.cleartext_endpoints
     endpoints_using_secrets_manager      = [for k, e in var.endpoints : k if e.secret_arn != ""]
 
-    # Encryption
     customer_managed_key    = var.kms_key_arn != ""
     endpoints_without_cmk   = local.endpoints_without_cmk
     s3_targets_without_cmk  = local.s3_targets_without_cmk
     replication_storage_key = var.kms_key_arn != "" ? var.kms_key_arn : "aws-managed DMS key"
 
-    # Compute
     compute_mode        = var.compute_mode
     multi_az            = local.provisioned ? var.multi_az : var.serverless.multi_az
     publicly_accessible = var.publicly_accessible
     engine_version      = var.engine_version != "" ? var.engine_version : "unpinned - AWS default"
 
-    # Data handling. Every field here is computed from the MERGED task settings,
-    # so a raw_overrides that disables validation shows up as disabled.
-    tasks_deleting_target_data = local.destructive_tasks
-    # DO_NOTHING: the target schema must exist before these start. The module
-    # runs no SQL; this is the fact the pipeline that does is gated on.
+    tasks_deleting_target_data        = local.destructive_tasks
     tasks_expecting_a_prebuilt_target = local.tasks_expecting_a_prebuilt_target
     tasks_without_validation          = local.unvalidated_tasks
     tasks_whose_validation_cannot_run = local.tasks_whose_validation_cannot_run
@@ -114,36 +104,20 @@ output "governance" {
     tasks_with_raw_overrides = [
       for k, t in var.tasks : k if trimspace(t.settings.raw_overrides) != "{}"
     ]
-    # Keys in raw_overrides that DMS does not document and would drop silently.
     tasks_with_unknown_task_settings = local.tasks_with_unknown_task_settings
-    # What DMS runs with, from the merged settings - raw_overrides can replace
-    # LogComponents, so the typed log_level alone would certify the wrong thing.
-    task_log_levels = local.task_log_severities
+    task_log_levels                  = local.task_log_severities
 
-    # Decisions taken in code. A reviewer reads this list, not the plan output.
     acknowledged_checks = sort(var.acknowledged_checks)
 
-    # Alerting. An unwatched CDC task is the failure mode this module is
-    # shaped around.
-    notifications_enabled = var.sns_topic_arn != ""
-    alarms_enabled        = local.alarms_enabled
-    # Serverless gets none of this module's observability, whatever the topic says.
+    notifications_enabled                  = local.notifications_need_topic
+    alarms_enabled                         = local.alarms_enabled
     observability_covers_this_compute_mode = local.provisioned
     cdc_tasks                              = keys(local.cdc_tasks)
     log_retention_days                     = var.log_retention_days
-    # false means log_retention_days is applied to nothing: serverless, or
-    # create_log_group = false, or 0. Read this before trusting the number.
-    log_group_managed_by_module = local.log_group_managed
+    log_group_managed_by_module            = local.log_group_managed
   }
 }
 
-# ---------------------------------------------------------------------------
-# What the SOURCE DATABASE has to do before any of this works
-#
-# None of it is reachable from Terraform, all of it fails at runtime rather than
-# at apply, and every engine fails differently. So it is emitted as data - hand
-# it to whoever owns the database.
-# ---------------------------------------------------------------------------
 output "source_prerequisites" {
   description = <<-EOT
     Per source engine, what the database owner has to change before CDC works.
@@ -171,17 +145,12 @@ output "network_contract" {
     required_interface_endpoints = local.required_interface_endpoints
     gateway_endpoints            = local.required_gateway_endpoints
 
-    # Endpoints whose necessity depends on how DMS internally routes a call,
-    # which cannot be determined from configuration. Cheap to add, and a hang
-    # if they turn out to be needed and are missing.
     verify_in_your_account = [
       "monitoring (CloudWatch metrics) - if the replication instance publishes metrics through your VPC rather than service-side, its absence means the CDC latency alarms never receive a datapoint. Because those alarms treat missing data as breaching, they would sit in ALARM permanently rather than failing silently. Confirm with the verify_endpoint_coverage command before trusting them.",
       "s3 (gateway, free) - required for an S3 target, and harmless otherwise. Add it regardless: it costs nothing and removes a whole class of hang.",
     ]
 
     required_egress = concat(
-      # server_name and port are optional on the secret path; without them the
-      # firewall request names the endpoint and says what is missing.
       [for k, e in var.endpoints : (
         e.server_name != "" && e.port != 0
         ? "${e.role}: ${e.server_name}:${e.port} from the replication instance"
@@ -240,46 +209,28 @@ output "account_prerequisites" {
 output "verify_commands" {
   description = "Copy-paste checks for what actually goes wrong, in the order you will need them. cdc_latency, validation_state, failed_tables, start_task and stop_task are maps keyed by task name, with the real task ARN or resource ID filled in. The cutover sequence is in RUNBOOK.md."
   value = !local.create ? null : {
-    # Before anything: does DMS reach the databases at all. This is the check
-    # that fails when the network contract was not met.
     test_connections   = local.provisioned ? "for e in ${join(" ", keys(var.endpoints))}; do aws dms test-connection --replication-instance-arn ${local.replication_instance_arn} --endpoint-arn $(aws dms describe-endpoints --filters Name=endpoint-id,Values=$e --query 'Endpoints[0].EndpointArn' --output text); done" : "serverless mode tests connections when the replication starts"
     connection_results = "aws dms describe-connections --filters Name=replication-instance-arn,Values=${local.replication_instance_arn} --query 'Connections[].[EndpointIdentifier,Status,LastFailureMessage]' --output table"
 
     task_status = local.provisioned ? "aws dms describe-replication-tasks --query 'ReplicationTasks[?starts_with(ReplicationTaskIdentifier, `${var.name}`)].[ReplicationTaskIdentifier,Status,ReplicationTaskStats.FullLoadProgressPercent,StopReason]' --output table" : "aws dms describe-replications --query 'Replications[].[ReplicationConfigIdentifier,Status,ReplicationStats]' --output table"
 
-    # The number that decides whether you can cut over.
-    # Per task, with the exact dimension set the metric is published under -
-    # instance name plus task resource ID. Anything less returns no datapoints.
     cdc_latency = {
       for k, id in local.task_resource_ids : k => "aws cloudwatch get-metric-statistics --namespace AWS/DMS --metric-name CDCLatencyTarget --dimensions Name=ReplicationInstanceIdentifier,Value=${local.instance_id} Name=ReplicationTaskIdentifier,Value=${id} --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) --period 300 --statistics Average --query 'sort_by(Datapoints,&Timestamp)[-6:].[Timestamp,Average]' --output table"
     }
 
-    # Validation is what turns "the task succeeded" into "the data matches".
     validation_state = { for k, t in merge(aws_dms_replication_task.this, aws_dms_replication_task.validation) : k => "aws dms describe-table-statistics --replication-task-arn ${t.replication_task_arn} --query 'TableStatistics[?ValidationState!=`Validated`].[SchemaName,TableName,ValidationState,ValidationFailedRecords]' --output table" }
     failed_tables    = { for k, t in aws_dms_replication_task.this : k => "aws dms describe-table-statistics --replication-task-arn ${t.replication_task_arn} --query 'TableStatistics[?TableState!=`Table completed`].[SchemaName,TableName,TableState,Inserts,Updates,Deletes]' --output table" }
 
     task_logs = local.provisioned ? "aws logs tail ${local.log_group_name} --since 1h --follow" : "aws logs describe-log-groups --log-group-name-prefix dms-serverless"
 
-    # Run this after the first task starts. It answers two questions the module
-    # cannot: whether DMS publishes the metric dimensions the alarms are built
-    # on, and whether metrics reach CloudWatch at all from an isolated VPC.
     verify_endpoint_coverage = "aws cloudwatch list-metrics --namespace AWS/DMS --query 'Metrics[?MetricName==`CDCLatencyTarget`].Dimensions' --output json"
 
-    # Run when you start a task. A CDC alarm on a task that has never run is
-    # already in ALARM (no data is breaching), and an alarm only notifies on a
-    # state change - so a task that stalls before its first datapoint would
-    # say nothing. Setting OK here re-arms it: no data within 15 minutes turns
-    # it back to ALARM, and that change notifies.
     arm_alarms = {
       for k, t in local.cdc_tasks : k => "aws cloudwatch set-alarm-state --alarm-name ${var.name}-${k}-cdc-latency-target --state-value OK --state-reason 'task started' && aws cloudwatch set-alarm-state --alarm-name ${var.name}-${k}-cdc-latency-source --state-value OK --state-reason 'task started'"
     }
 
-    # Starting is a change-controlled act, which is why start = false is the
-    # default and the command is handed over rather than run. A validation-only
-    # task starts the same way (its ARN is in validation_task_arns).
     start_task = local.provisioned ? { for k, t in aws_dms_replication_task.this : k => "aws dms start-replication-task --replication-task-arn ${t.replication_task_arn} --start-replication-task-type start-replication" } : { for k, c in aws_dms_replication_config.this : k => "aws dms start-replication --replication-config-arn ${c.arn} --start-replication-type start-replication" }
 
-    # The one that stops the bill after cutover.
     stop_task             = local.provisioned ? { for k, t in aws_dms_replication_task.this : k => "aws dms stop-replication-task --replication-task-arn ${t.replication_task_arn}" } : { for k, c in aws_dms_replication_config.this : k => "aws dms stop-replication --replication-config-arn ${c.arn}" }
     what_is_still_billing = "aws dms describe-replication-instances --query 'ReplicationInstances[].[ReplicationInstanceIdentifier,ReplicationInstanceClass,MultiAZ,ReplicationInstanceStatus]' --output table"
   }
@@ -366,8 +317,6 @@ output "notification_requirements" {
 output "kms_key_policy_requirements" {
   description = "What each customer-managed key's policy has to allow for this migration to work. The module uses the keys but cannot write their policies - hand this to the key owner before the first apply. A missing CloudWatch Logs grant fails the log group create part way through the apply. Each entry carries the machine-readable fields sid, principals, actions, conditions (contract v2, compiled by modules/kms) alongside the prose fields."
   value = !local.create ? null : concat(
-    # The services that publish to an SSE-KMS topic need the topic's key.
-    # Without it SNS rejects the publish and nobody is told.
     var.sns_topic_kms_key_arn == "" ? [] : [{
       key = var.sns_topic_kms_key_arn
       principal = join(", ", concat(

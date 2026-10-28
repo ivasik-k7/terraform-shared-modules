@@ -1,0 +1,106 @@
+{
+  // Kiro agent permissions.
+  //
+  // The model here is an ALLOW-LIST: a command that matches an entry runs
+  // without asking, everything else prompts. So the security posture is set by
+  // what is deliberately absent, not by a deny-list - see the table in
+  // .kiro/README.md. Keep destructive and outward-facing commands off this list
+  // and they will prompt every single time, which is the point.
+  //
+  // Verify the key name in Settings -> Kiro Agent -> Trusted Commands if your
+  // Kiro build stores these elsewhere; adding a command through that UI writes
+  // to this same setting.
+  "kiroAgent.trustedCommands": [
+    // --- reading the workspace -------------------------------------------
+    "ls",
+    "ls *",
+    "cat *",
+    "head *",
+    "tail *",
+    "wc *",
+    "file *",
+    "find *",
+    "grep *",
+    "rg *",
+    "sed -n *",
+    "diff *",
+    "tree *",
+    "jq *",
+    "python3 -c *",
+    "date",
+    "pwd",
+    "which *",
+    "env",
+
+    // --- git, read-only ---------------------------------------------------
+    "git status",
+    "git status *",
+    "git diff",
+    "git diff *",
+    "git log *",
+    "git show *",
+    "git branch",
+    "git branch --list *",
+    "git ls-files *",
+    "git blame *",
+    "git rev-parse *",
+    "git check-ignore *",
+    "git config --get *",
+    "git worktree list",
+
+    // --- terraform, no credentials required -------------------------------
+    "terraform fmt *",
+    "terraform validate",
+    "terraform validate *",
+    "terraform test",
+    "terraform test *",
+    "terraform version",
+    "terraform init -backend=false",
+    "terraform init -backend=false *",
+    "terraform providers *",
+    "terraform output *",
+    "terraform graph *",
+    "terraform console *",
+    "tflint",
+    "tflint *",
+    "terraform-docs *",
+
+    // --- this repo's own gates -------------------------------------------
+    "python3 tests/lint_validations.py *",
+    "python3 tests/lint_components.py *",
+    "python3 modules/ami-builder/tests/lint_validations.py *",
+    "python3 modules/ami-builder/tests/lint_components.py *",
+    "shellcheck *",
+    "bash -n *",
+    "yamllint *",
+    "python3 -m json.tool *",
+
+    // --- identity only, nothing mutating ---------------------------------
+    "aws sts get-caller-identity",
+    "aws configure list"
+  ],
+
+  // Terraform ergonomics: formatting is a CI gate here, so let the editor do it.
+  "[terraform]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "hashicorp.terraform"
+  },
+  "[terraform-vars]": {
+    "editor.formatOnSave": true
+  },
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.associations": {
+    "*.tftest.hcl": "terraform"
+  },
+
+  // Keep the agent's file search out of provider caches and state.
+  "files.exclude": {
+    "**/.terraform": true
+  },
+  "search.exclude": {
+    "**/.terraform": true,
+    "**/*.tfstate*": true,
+    "**/__pycache__": true
+  }
+}

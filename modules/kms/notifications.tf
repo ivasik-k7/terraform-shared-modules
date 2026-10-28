@@ -25,7 +25,6 @@ locals {
 
   rule_tags = merge(var.tags, { ManagedBy = "Terraform", Module = "kms", KeySet = var.name })
 
-  # One pattern per kind, filled with a region's key ARNs.
   native_pattern = {
     for which in keys(local.regions) : which => jsonencode({
       source        = ["aws.kms"]
@@ -39,7 +38,8 @@ locals {
       "detail-type" = ["AWS API Call via CloudTrail"]
       detail = {
         eventSource = ["kms.amazonaws.com"]
-        # ReplicateKey is logged in the primary's region only.
+        # CloudTrail records ReplicateKey in the primary key's Region and CreateKey in the replica's.
+        # https://docs.aws.amazon.com/kms/latest/APIReference/API_ReplicateKey.html
         eventName = which == "primary" ? local.cloudtrail_events : [for e in local.cloudtrail_events : e if e != "ReplicateKey"]
         resources = { ARN = which == "primary" ? [for k in sort(keys(local.key_arn)) : local.key_arn[k]] : values(local.replica_arns) }
       }

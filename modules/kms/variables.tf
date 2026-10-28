@@ -78,10 +78,6 @@ variable "acknowledged_checks" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Keys
-# ---------------------------------------------------------------------------
-
 variable "keys" {
   description = <<-EOT
     The key set, keyed by a short name. Each entry is one customer managed key:
@@ -428,10 +424,6 @@ variable "key_defaults" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Who
-# ---------------------------------------------------------------------------
-
 variable "replica_region" {
   description = "Region of the replicas of keys with replicate = true, e.g. \"eu-west-1\". This module compiles their policies, aliases and notification patterns into output.replicas; modules/replica creates them there, with a provider for that region - in this workspace or a separate disaster-recovery one."
   type        = string
@@ -567,10 +559,6 @@ variable "principal_roles" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Contracts
-# ---------------------------------------------------------------------------
-
 variable "consumers" {
   description = <<-EOT
     The kms_key_policy_requirements outputs of the modules that use these keys,
@@ -589,10 +577,6 @@ variable "consumers" {
     error_message = "consumers must be a map of requirement lists keyed by lowercase names, e.g. { dms = module.dms.kms_key_policy_requirements }."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Guardrails
-# ---------------------------------------------------------------------------
 
 variable "guardrails" {
   description = <<-EOT
@@ -703,10 +687,6 @@ variable "guardrails" {
     error_message = "guardrails.break_glass must be IAM role or user ARNs."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Notifications
-# ---------------------------------------------------------------------------
 
 variable "notifications" {
   description = <<-EOT

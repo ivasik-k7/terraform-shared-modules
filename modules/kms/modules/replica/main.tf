@@ -2,7 +2,6 @@ locals {
   create = var.create && var.replicas != null
   keys   = local.create ? var.replicas.keys : {}
 
-  # The two replica resources, one map: AWS-generated and imported material.
   replica_id  = { for k, v in local.keys : k => v.origin == "EXTERNAL" ? aws_kms_replica_external_key.this[k].key_id : aws_kms_replica_key.this[k].key_id }
   replica_arn = { for k, v in local.keys : k => v.origin == "EXTERNAL" ? aws_kms_replica_external_key.this[k].arn : aws_kms_replica_key.this[k].arn }
 
@@ -36,7 +35,6 @@ resource "aws_kms_replica_key" "this" {
   tags = merge(var.tags, each.value.tags)
 
   lifecycle {
-    # aws_kms_key_policy owns the live policy; this one only bootstraps.
     ignore_changes = [policy]
 
     precondition {
@@ -51,8 +49,8 @@ resource "aws_kms_replica_key" "this" {
   }
 }
 
-# A replica of imported material is created pending import: the custodians
-# import the same material in this region, out of band.
+# A replica of imported material is created with no key material; the same material is imported into it.
+# https://docs.aws.amazon.com/kms/latest/APIReference/API_ReplicateKey.html
 resource "aws_kms_replica_external_key" "this" {
   for_each = { for k, v in local.keys : k => v if v.origin == "EXTERNAL" }
 

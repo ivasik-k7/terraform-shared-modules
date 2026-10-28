@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "name": "Terraform gate",
+  "description": "After a module file changes, run the same gates CI runs, and fix what they find.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "modules/**/*.tf",
+      "modules/**/*.tftest.hcl"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "A file in a Terraform module changed. From that module's directory run, in order: terraform fmt -check -recursive ., terraform validate, terraform test, and any tests/lint_*.py that exists (with --self-test first). Report the actual output. If anything fails, fix the cause rather than the symptom - and if a validation condition changed, re-run tests/lint_validations.py, because Terraform 1.9 evaluates both operands of || and && and CI runs the floor version. Do not push anything."
+  }
+}

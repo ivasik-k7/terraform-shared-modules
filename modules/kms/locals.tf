@@ -1,24 +1,18 @@
 locals {
   create = var.create
 
-  partition  = coalesce(one(data.aws_partition.current[*].partition), "aws")
-  region     = coalesce(one(data.aws_region.current[*].name), "us-east-1")
-  account_id = coalesce(one(data.aws_caller_identity.current[*].account_id), "000000000000")
-  # Replicas are created by modules/replica, in a provider for this region;
-  # this module only compiles what they need.
+  partition      = coalesce(one(data.aws_partition.current[*].partition), "aws")
+  region         = coalesce(one(data.aws_region.current[*].name), "us-east-1")
+  account_id     = coalesce(one(data.aws_caller_identity.current[*].account_id), "000000000000")
   replica_region = var.replica_region != "" ? var.replica_region : local.region
   regions        = { primary = local.region, replica = local.replica_region }
 
   acknowledged = toset(var.acknowledged_checks)
   root_arn     = "arn:${local.partition}:iam::${local.account_id}:root"
-  # KMS rejects wildcards in principal ARNs.
+  # A principal ARN cannot contain a wildcard.
+  # https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html
   iam_arn_re = "^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/[^*?]+|user/[^*?]+)$"
 
-  # -------------------------------------------------------------------------
-  # Deployers: named, or the role running the plan
-  # -------------------------------------------------------------------------
-
-  # A federated-user or root session has no IAM role behind it: no deployer.
   detected_issuer   = one(data.aws_iam_session_context.deployer[*].issuer_arn)
   detected_deployer = can(regex(local.iam_arn_re, local.detected_issuer)) ? local.detected_issuer : null
   deployers         = length(var.deployers) > 0 ? var.deployers : compact([local.detected_deployer])
@@ -27,13 +21,7 @@ locals {
 
   break_glass = var.guardrails.break_glass
   exempt      = distinct(concat(local.deployers, local.break_glass))
-  # A disaster-recovery workspace's role owns the replicas, so the replicas'
-  # guardrails exempt it too; the primary's do not.
-  exempt_in = { primary = local.exempt, replica = distinct(concat(local.exempt, var.replica_deployers)) }
-
-  # -------------------------------------------------------------------------
-  # Keys, with profiles and defaults resolved
-  # -------------------------------------------------------------------------
+  exempt_in   = { primary = local.exempt, replica = distinct(concat(local.exempt, var.replica_deployers)) }
 
   profiles = {
     ""        = { services = [], spec = "SYMMETRIC_DEFAULT", usage = "ENCRYPT_DECRYPT" }
@@ -47,7 +35,6 @@ locals {
     dnssec    = { services = ["route53-dnssec"], spec = "ECC_NIST_P256", usage = "SIGN_VERIFY" }
   }
 
-  # A spec given without a usage takes the usage most specs are made for.
   usage_for_spec = {
     SYMMETRIC_DEFAULT = "ENCRYPT_DECRYPT", RSA_2048 = "ENCRYPT_DECRYPT", RSA_3072 = "ENCRYPT_DECRYPT", RSA_4096 = "ENCRYPT_DECRYPT",
     ECC_NIST_P256     = "SIGN_VERIFY", ECC_NIST_P384 = "SIGN_VERIFY", ECC_NIST_P521 = "SIGN_VERIFY", ECC_SECG_P256K1 = "SIGN_VERIFY",
@@ -71,8 +58,6 @@ locals {
     SM2               = ["ENCRYPT_DECRYPT", "SIGN_VERIFY", "KEY_AGREEMENT"]
   }
 
-  # A key with generations becomes one key per generation, <key>-<generation>;
-  # the last is active. Everything below works on these names.
   expanded_keys = merge([
     for k, v in var.keys : {
       for i, g in(length(v.generations) == 0 ? [""] : v.generations) : (g == "" ? k : "${k}-${g}") => merge(v, {
@@ -86,15 +71,11 @@ locals {
   keys = {
     for k, v in local.expanded_keys : k => merge(v, {
       spec = v.spec != "" ? v.spec : local.profiles[v.purpose].spec
-      # A spec without a usage keeps the purpose's usage when the two combine
-      # (signing + RSA_2048 is SIGN_VERIFY), else takes the spec's natural one.
       usage = v.usage != "" ? v.usage : (v.spec == "" ? local.profiles[v.purpose].usage : (
         (v.purpose != "" ? contains(lookup(local.valid_usages, v.spec, []), local.profiles[v.purpose].usage) : false)
         ? local.profiles[v.purpose].usage : lookup(local.usage_for_spec, v.spec, "")
       ))
 
-      # The active key takes the key's aliases; every generation also has
-      # its own, <name>-<key>-<generation>.
       aliases              = v.active ? concat(length(v.aliases) > 0 ? v.aliases : ["${var.name}-${v.base}"], v.generation != "" ? ["${var.name}-${k}"] : []) : ["${var.name}-${k}"]
       grants               = v.active ? v.grants : {}
       external             = v.origin == "EXTERNAL"
@@ -124,21 +105,19 @@ locals {
     )
   }
 
-  # Automatic rotation exists for symmetric keys with AWS-generated material
-  # outside custom key stores, and nowhere else.
+  # Automatic rotation exists only for symmetric keys with AWS_KMS material, outside custom key stores.
+  # https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html
   rotates = { for k, v in local.keys : k => v.rotation ? (local.key_kind[k] == "symmetric" ? !(v.custom_store || v.external) : false) : false }
 
-  # The active key of each key with generations.
   active_key = { for k, v in local.keys : v.base => k if v.active }
 
-  # The two key resources, one map: AWS-generated material and imported.
   key_arn = !local.create ? {} : { for k, v in local.keys : k => v.external ? aws_kms_external_key.this[k].arn : aws_kms_key.this[k].arn }
   key_id  = !local.create ? {} : { for k, v in local.keys : k => v.external ? aws_kms_external_key.this[k].id : aws_kms_key.this[k].key_id }
 
   replicated_keys = { for k, v in local.keys : k => v if v.replicate }
 
-  # A multi-Region replica keeps its primary's key ID, so its ARN is known as
-  # soon as the primary exists - before modules/replica creates it.
+  # Related multi-Region keys share one key ID, so a replica's ARN is known before it exists.
+  # https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html
   replica_arns = !local.create ? {} : {
     for k, v in local.replicated_keys : k => "arn:${local.partition}:kms:${local.replica_region}:${local.account_id}:key/${local.key_id[k]}"
   }
@@ -152,18 +131,12 @@ locals {
     }, { for g in compact([v.generation]) : "Generation" => g })
   }
 
-  # Keyed by alias name alone (unique, validated), so moving an alias to
-  # another key in the set updates it in place instead of recreating it.
   aliases = merge([
     for k, v in local.keys : { for a in v.aliases : a => { key = k, name = "alias/${a}" } }
   ]...)
 
-  # -------------------------------------------------------------------------
-  # Action sets
-  # -------------------------------------------------------------------------
-
-  # The AWS default policy's administrator list, written out; its wildcards
-  # (Create*, Put*...) would also grant every operation KMS adds later.
+  # The default administrator wildcards (kms:Create*, kms:Put*...) also allow operations KMS adds later.
+  # https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html
   manage_actions = [
     "kms:DescribeKey", "kms:EnableKey", "kms:DisableKey", "kms:EnableKeyRotation", "kms:DisableKeyRotation",
     "kms:GetKeyPolicy", "kms:GetKeyRotationStatus", "kms:GetPublicKey", "kms:ListAliases", "kms:ListGrants",
@@ -171,13 +144,10 @@ locals {
     "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:UpdateKeyDescription", "kms:RevokeGrant",
     "kms:TagResource", "kms:UntagResource", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:RotateKeyOnDemand",
   ]
+  # ReplicateKey sets the replica's key policy from its Policy parameter.
+  # https://docs.aws.amazon.com/kms/latest/APIReference/API_ReplicateKey.html
   multi_region_actions = ["kms:ReplicateKey", "kms:UpdatePrimaryRegion"]
 
-  # Deployers and break-glass also change the policy, create the module's
-  # grants and replicate multi-Region keys; administrators do none of these
-  # (PutKeyPolicy only with administrators_can_change_policy). ReplicateKey
-  # takes a caller-chosen policy for the copy, so it is as strong as
-  # PutKeyPolicy over the key material.
   owner_actions = { for k, v in local.keys : k => concat(local.manage_actions, ["kms:PutKeyPolicy", "kms:CreateGrant"], v.multi_region ? local.multi_region_actions : []) }
   admin_actions = { for k, v in local.keys : k => concat(local.manage_actions, var.administrators_can_change_policy ? ["kms:PutKeyPolicy"] : []) }
 
@@ -188,9 +158,6 @@ locals {
     )
   }
 
-  # Cryptographic actions by key kind: all of them, the producing half, the
-  # consuming half. Describe actions are kept apart because they carry no
-  # encryption context.
   crypto_actions_by_kind = {
     symmetric          = { all = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*"], produce = ["kms:Encrypt", "kms:GenerateDataKey*"], consume = ["kms:Decrypt"] }
     asymmetric_encrypt = { all = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*"], produce = ["kms:Encrypt"], consume = ["kms:Decrypt"] }
@@ -209,8 +176,6 @@ locals {
     "kms:Sign", "kms:Verify", "kms:DeriveSharedSecret",
   ]
 
-  # A consumer never needs to manage a key; a requirement asking for one of
-  # these is refused.
   management_only_actions = [
     "kms:PutKeyPolicy", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:DisableKey", "kms:EnableKey",
     "kms:DisableKeyRotation", "kms:EnableKeyRotation", "kms:RotateKeyOnDemand", "kms:CreateAlias", "kms:UpdateAlias",
@@ -218,19 +183,14 @@ locals {
     "kms:UpdatePrimaryRegion", "kms:ImportKeyMaterial", "kms:DeleteImportedKeyMaterial", "kms:CreateKey",
   ]
 
-  # Encryption context on direct use: required keys as Null conditions, and
-  # allowed values as StringEquals (tenant isolation, policy variables).
-  # Symmetric keys only: the others take no context.
+  # Asymmetric and HMAC keys accept no encryption context.
+  # https://docs.aws.amazon.com/kms/latest/developerguide/encrypt_context.html
   context_condition = {
     for k, v in local.keys : k => merge(
       (local.key_kind[k] == "symmetric" ? length(v.require_encryption_context) > 0 : false) ? { Null = { for c in v.require_encryption_context : "kms:EncryptionContext:${c}" => "false" } } : {},
       (local.key_kind[k] == "symmetric" ? length(v.encryption_context_values) > 0 : false) ? { StringEquals = { for c, vals in v.encryption_context_values : "kms:EncryptionContext:${c}" => vals } } : {},
     )
   }
-
-  # -------------------------------------------------------------------------
-  # Role statements
-  # -------------------------------------------------------------------------
 
   role_statements = {
     for k, v in local.keys : k => concat(
@@ -276,8 +236,6 @@ locals {
         Resource  = "*"
         Condition = { Bool = { "kms:GrantIsForAWSResource" = "true" } }
       }] : s if local.key_kind[k] == "symmetric" ? length(concat(v.users, v.grant_users)) > 0 : false],
-      # Other accounts get use and resource grants; their own IAM policies
-      # decide which of their principals actually may.
       [for s in [
         {
           Sid       = "OtherAccounts"
@@ -295,8 +253,6 @@ locals {
           Condition = { Bool = { "kms:GrantIsForAWSResource" = "true" } }
         },
       ] : s if length(v.account_roots) == 0 ? false : (s.Sid == "OtherAccounts" ? true : local.key_kind[k] == "symmetric")],
-      # Imported material: custodians fetch import parameters (with a SHA-256
-      # wrapping only) and import or delete the material.
       [for s in [
         {
           Sid       = "KeyCustodiansImportParameters"
@@ -317,23 +273,17 @@ locals {
     )
   }
 
-  # -------------------------------------------------------------------------
-  # Service presets, per region
-  #
-  # Service principals only where the service calls KMS as itself; everything
-  # else calls with the caller's identity through a forward access session,
-  # where kms:ViaService applies - never on a Service principal statement.
-  # -------------------------------------------------------------------------
-
+  # kms:ViaService applies only to forward access sessions, never to a service principal's own calls.
+  # https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service
   via_service = {
     s3               = ["s3.%s.amazonaws.com"]
     secretsmanager   = ["secretsmanager.%s.amazonaws.com"]
     rds              = ["rds.%s.amazonaws.com"]
     dms              = ["dms.%s.amazonaws.com"]
     ebs              = ["ec2.%s.amazonaws.com"]
-    backup           = ["backup.*.amazonaws.com"] # cross-Region copies call from the destination
+    backup           = ["backup.*.amazonaws.com"]
     ssm              = ["ssm.%s.amazonaws.com"]
-    dynamodb         = ["dynamodb.*.amazonaws.com"] # global tables replicate across Regions
+    dynamodb         = ["dynamodb.*.amazonaws.com"]
     efs              = ["elasticfilesystem.%s.amazonaws.com"]
     ecr              = ["ecr.%s.amazonaws.com"]
     lambda           = ["lambda.%s.amazonaws.com"]
@@ -365,8 +315,6 @@ locals {
     s3tables         = ["s3tables.%s.amazonaws.com"]
   }
 
-  # Service principals publishing to an encrypted SNS topic or SQS queue.
-  # EventBridge to SNS rejects aws:Source* conditions in the key policy.
   source_presets = {
     "cloudwatch-to-sns"  = { principal = "cloudwatch.amazonaws.com", actions = ["kms:GenerateDataKey*", "kms:Decrypt"], scoped = true }
     "eventbridge-to-sns" = { principal = "events.amazonaws.com", actions = ["kms:GenerateDataKey*", "kms:Decrypt"], scoped = false }
@@ -376,14 +324,13 @@ locals {
     "eventbridge-to-sqs" = { principal = "events.amazonaws.com", actions = ["kms:GenerateDataKey", "kms:Decrypt"], scoped = true }
     "s3-events-to-sqs"   = { principal = "s3.amazonaws.com", actions = ["kms:GenerateDataKey", "kms:Decrypt"], scoped = true }
     "sns-to-sqs"         = { principal = "sns.amazonaws.com", actions = ["kms:GenerateDataKey", "kms:Decrypt"], scoped = true }
-    # SES receiving mail (to S3/SNS) and publishing to an encrypted topic
-    # calls KMS as itself, not through a caller's forward access session.
+    # SES uses keys as its service principal, ses.amazonaws.com.
+    # https://docs.aws.amazon.com/ses/latest/dg/receiving-email-permissions.html
     ses = { principal = "ses.amazonaws.com", actions = ["kms:GenerateDataKey*", "kms:Decrypt"], scoped = true }
   }
 
   autoscaling_slr = "arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
 
-  # Every statement-bearing preset, per region.
   preset_library = {
     for which, r in local.regions : which => merge(
       {
@@ -490,7 +437,6 @@ locals {
     )
   }
 
-  # Presets that need a specific key kind; the rest need SYMMETRIC_DEFAULT.
   preset_spec = { "route53-dnssec" = { spec = "ECC_NIST_P256", usage = "SIGN_VERIFY" } }
 
   via_values = {
@@ -502,9 +448,6 @@ locals {
     }
   }
 
-  # Who may use a key through its caller-path services: "account" is the AWS
-  # managed key pattern (any principal of these accounts, only through those
-  # services); "named" keeps it to the key's own principals.
   through_principals = {
     for k, v in local.keys : k => v.service_access == "account" ? ["*"] : distinct(concat(
       v.users, v.encrypters, v.decrypters, local.deployers, v.account_roots,
@@ -544,18 +487,11 @@ locals {
     }
   }
 
-  # Decoded from "[]" when empty: a ternary between [] and the decoded tuple
-  # is a type error for any list of two or more statements.
+  # A conditional between [] and decoded statements of different shapes is a type error.
   extra_statements = { for k, v in local.keys : k => jsondecode(v.extra_statements == "" ? "[]" : v.extra_statements) }
-
-  # -------------------------------------------------------------------------
-  # Consumer contracts
-  # -------------------------------------------------------------------------
 
   principal_roles = merge({ deployer = local.deployers }, var.principal_roles)
 
-  # A consumer must be a list of objects with a key field; anything else (a
-  # module object passed whole, a string) is reported, not silently empty.
   consumer_readable = {
     for c in keys(var.consumers) : c => can(concat(var.consumers[c], [])) ? alltrue([for r in var.consumers[c] : can(r.key)]) : false
   }
@@ -575,8 +511,6 @@ locals {
         conditions = try([for x in r.conditions : { test = tostring(x.test), variable = tostring(x.variable), values = [for y in x.values : tostring(y)] }], [])
         purpose    = try(tostring(r.purpose), try(tostring(r.why), ""))
         machine    = can(r.principals) && can(r.sid) && (can(concat(r.actions, [])) ? length(r.actions) > 0 : false)
-        # A field present with the wrong shape (a string where a list belongs)
-        # would otherwise compile to an empty list.
         misshapen = !can(concat(try(r.actions, []), [])) || anytrue([
           for f in ["services", "arns", "roles"] : !can(concat(try(r.principals[f], []), []))
         ]) || !can(concat(try(r.conditions, []), []))
@@ -585,18 +519,15 @@ locals {
     ] : []
   ])
 
-  # A requirement whose key is empty belongs to a feature the producer has off.
   not_applicable = [for r in local.requirements : r.label if r.key == ""]
 
   grant_actions = ["kms:creategrant", "kms:listgrants", "kms:revokegrant"]
 
-  # Classified whatever the key: on a first plan the key ARNs are unknown,
-  # and a refusal must still stop the plan before any key is created.
   classified = [
     for r in local.requirements : merge(r, {
       applicable = r.key != ""
-      # Action names are case-insensitive and may end in *: compared as
-      # patterns, so kms:Put* or kms:putkeypolicy count as PutKeyPolicy.
+      # IAM action names are case-insensitive.
+      # https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_action.html
       patterns = [for a in r.actions : "^${replace(lower(a), "*", ".*")}$"]
     })
   ]
@@ -605,26 +536,17 @@ locals {
     for r in local.classified : merge(r, {
       aws              = distinct(concat(r.arns, flatten([for role in r.roles : lookup(local.principal_roles, role, [])])))
       unresolved_roles = [for role in r.roles : role if length(lookup(local.principal_roles, role, [])) == 0]
-      # Refused at plan: a public principal, a principal that is no IAM ARN,
-      # or an action that is not a plain kms: action, kms:*, or one that
-      # covers a management action no consumer needs.
       rejected = r.machine ? (
         anytrue([for a in r.arns : !can(regex(local.iam_arn_re, a))]) ||
         anytrue([for s in r.services : !can(regex("^[a-z0-9.-]+\\.amazonaws\\.com(\\.cn)?$", s))]) ||
         anytrue([for a in r.actions : !can(regex("^kms:[A-Za-z]+\\*?$", a))]) ||
         anytrue([for p in r.patterns : anytrue([for m in local.management_only_actions : can(regex(p, lower(m)))])])
       ) : false
-      # Not compiled: a condition without values, the same test and key twice
-      # (merging them would turn an AND into an OR), or a field of the wrong
-      # shape.
       malformed = r.machine ? (
         r.misshapen ||
         anytrue([for c in r.conditions : length(c.values) == 0 || c.test == "" || c.variable == ""]) ||
         length(r.conditions) != length(distinct([for c in r.conditions : "${c.test}|${c.variable}"]))
       ) : r.misshapen
-      # Grant actions with neither kms:ViaService nor kms:GrantIsForAWSResource
-      # would let the principal grant the key to anyone: they are compiled
-      # into a second statement that only allows grants for AWS resources.
       grant_list = [for i, a in r.actions : a if anytrue([for g in local.grant_actions : can(regex(r.patterns[i], g))])]
       grants_scoped = anytrue([
         for c in r.conditions : contains(["kms:viaservice", "kms:grantisforawsresource"], lower(c.variable))
@@ -693,10 +615,6 @@ locals {
     }
   }
 
-  # -------------------------------------------------------------------------
-  # Guardrails
-  # -------------------------------------------------------------------------
-
   org_exempt_accounts = distinct(concat(var.guardrails.trusted_accounts, local.deployer_accounts, [for p in var.replica_deployers : regex("^arn:aws[a-z-]*:iam::([0-9]{12}):", p)[0]]))
   vpce_ids            = { primary = var.guardrails.vpc_endpoint_ids, replica = var.guardrails.replica_vpc_endpoint_ids }
 
@@ -742,10 +660,7 @@ locals {
         Condition = {
           StringNotEqualsIfExists = { "aws:SourceVpce" = local.vpce_ids[which] }
           BoolIfExists            = { "aws:PrincipalIsAWSService" = "false", "aws:ViaAWSService" = "false" }
-          # EBS decrypts with an instance identity role from the service network.
-          # Service-linked roles (e.g. Auto Scaling's, for encrypted volumes)
-          # call KMS directly from the service's network.
-          ArnNotLikeIfExists = { "aws:PrincipalArn" = concat(["arn:${local.partition}:iam::*:role/aws:ec2-infrastructure*", "arn:${local.partition}:iam::*:role/aws-service-role/*"], var.guardrails.vpc_endpoint_exempt_principals) }
+          ArnNotLikeIfExists      = { "aws:PrincipalArn" = concat(["arn:${local.partition}:iam::*:role/aws:ec2-infrastructure*", "arn:${local.partition}:iam::*:role/aws-service-role/*"], var.guardrails.vpc_endpoint_exempt_principals) }
         }
       }] : s if length(local.vpce_ids[which]) > 0],
       [for s in [merge(
@@ -814,11 +729,6 @@ locals {
     )
   }
 
-  # Per key and region. A multi-Region key replicates only to replica_region
-  # and is promoted only between its two regions: ReplicateKey sets the copy's
-  # policy, so a copy elsewhere would escape every statement here. Owners of
-  # the replicas (replica_deployers) replicate the key from the primary and
-  # own the replica.
   key_region_statements = {
     for k, v in local.keys : k => {
       for which in keys(local.regions) : which => concat(
@@ -863,14 +773,6 @@ locals {
     }
   }
 
-  # -------------------------------------------------------------------------
-  # Documents
-  #
-  # bootstrap: what the key is created with - everything known before any
-  # consumer exists. final: bootstrap plus the consumer contracts, owned by
-  # aws_kms_key_policy.
-  # -------------------------------------------------------------------------
-
   bootstrap_statements = {
     for k, v in local.keys : k => {
       for which in keys(local.regions) : which => concat(
@@ -900,8 +802,6 @@ locals {
     }
   }
 
-  # Sid is optional; only repeated non-empty ones are a problem. Both regions:
-  # the replica's policy carries its own consumer statements.
   duplicate_sids = {
     for k, v in local.keys : k => distinct(flatten([
       for which in keys(local.regions) : [
@@ -911,7 +811,6 @@ locals {
     ]))
   }
 
-  # The algorithm condition key and the operations it governs, per key kind.
   algorithm_actions = {
     symmetric          = { key = "", actions = [] }
     asymmetric_encrypt = { key = "kms:EncryptionAlgorithm", actions = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*"] }
@@ -920,7 +819,6 @@ locals {
     agreement          = { key = "", actions = [] }
   }
 
-  # What CreateGrant accepts per key kind.
   grant_operations_by_kind = {
     symmetric          = ["Decrypt", "Encrypt", "GenerateDataKey", "GenerateDataKeyWithoutPlaintext", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext", "ReEncryptFrom", "ReEncryptTo", "CreateGrant", "RetireGrant", "DescribeKey"]
     asymmetric_encrypt = ["Encrypt", "Decrypt", "ReEncryptFrom", "ReEncryptTo", "GetPublicKey", "CreateGrant", "RetireGrant", "DescribeKey"]
@@ -929,6 +827,7 @@ locals {
     agreement          = ["DeriveSharedSecret", "GetPublicKey", "CreateGrant", "RetireGrant", "DescribeKey"]
   }
 
-  # KMS accepts tab, newline, carriage return and U+0020 to U+00FF.
+  # Key policies accept tab, line feed, carriage return and U+0020 to U+00FF.
+  # https://docs.aws.amazon.com/kms/latest/APIReference/API_PutKeyPolicy.html
   policy_charset_re = "^[\\t\\n\\r\\x{20}-\\x{FF}]*$"
 }

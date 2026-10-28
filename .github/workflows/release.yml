@@ -1,0 +1,79 @@
+# A tag <module>-vX.Y.Z is a release of modules/<module>: the HCP Terraform
+# private registry publishes from the tag, and this job publishes the GitHub
+# release with that version's CHANGELOG section. It refuses a tag the
+# registry should not see: unknown module, undated CHANGELOG entry, or a
+# commit that is not on main. Run `make release-check` before tagging.
+#
+# Nothing here applies infrastructure.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "*-v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the tag and extract its notes
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Greedy: the last -v<semver> splits, so gitlab-runner-fargate-v2-v1.0.0 works.
+          if [[ ! "$TAG" =~ ^(.+)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::tag $TAG is not <module>-vX.Y.Z"; exit 1
+          fi
+          module="${BASH_REMATCH[1]}" version="${BASH_REMATCH[2]}"
+          [ -d "modules/$module" ] || { echo "::error::no modules/$module for tag $TAG"; exit 1; }
+
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$TAG is not on main; release from main only"; exit 1; }
+
+          changelog="modules/$module/CHANGELOG.md"
+          [ -f "$changelog" ] || { echo "::error::$changelog is missing"; exit 1; }
+          heading="^## \[${version//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}"
+          grep -qE "$heading" "$changelog" \
+            || { echo "::error::$changelog has no dated '## [$version] - YYYY-MM-DD' heading"; exit 1; }
+
+          # ENVIRON, not -v: -v would process the backslashes in the pattern.
+          HEADING="$heading" awk '
+            $0 ~ ENVIRON["HEADING"] { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' "$changelog" > "$RUNNER_TEMP/notes.md"
+          [ -s "$RUNNER_TEMP/notes.md" ] || echo "(no notes under the heading)" > "$RUNNER_TEMP/notes.md"
+
+          echo "module=$module" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          MODULE: ${{ steps.notes.outputs.module }}
+          VERSION: ${{ steps.notes.outputs.version }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$TAG" --verify-tag --title "$MODULE v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}" --latest=false

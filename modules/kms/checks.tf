@@ -1,10 +1,4 @@
-# Advisory checks: defensible postures a reviewer should see. Each is
-# silenced by naming it in acknowledged_checks, which output.governance lists.
-
 locals {
-  # A key field that is no key identifier at all (prose such as "the key
-  # encrypting the topic") can never match; it is reported apart from a real
-  # identifier that belongs to another key set.
   key_is_identifier = { for i, r in local.machine : i => can(regex("^(arn:aws[a-z-]*:kms:|alias/|mrk-[0-9a-f]{32}$|[0-9a-f]{8}-[0-9a-f]{4}-)", r.key)) }
 
   all_match_ids = flatten([for k, ids in local.key_match_ids : concat(ids.primary, ids.replica)])
@@ -26,7 +20,6 @@ locals {
 
   policy_sizes = { for k, v in local.keys : k => length(local.final_policy[k].primary) }
 
-  # Anything that could put a principal from another account in a policy.
   named_principals = distinct(concat(
     local.deployers, local.break_glass, flatten(values(var.principal_roles)), flatten([for r in local.machine : r.arns]),
     flatten([for k, v in local.keys : concat(v.administrators, v.users, v.auditors, v.encrypters, v.decrypters, v.grant_users)]),
@@ -124,7 +117,6 @@ check "replicas_have_their_vpc_endpoints" {
   }
 }
 
-# Separation of duties: whoever manages a key should not also use it.
 check "duties_are_separated" {
   assert {
     condition     = contains(local.acknowledged, "duties_are_separated") || !local.create ? true : length(local.duty_overlaps) == 0
@@ -132,7 +124,6 @@ check "duties_are_separated" {
   }
 }
 
-# Imported material can expire, and the key stops working when it does.
 check "imported_material_expiry_is_watched" {
   assert {
     condition     = contains(local.acknowledged, "imported_material_expiry_is_watched") || !local.create ? true : length([for k, v in local.keys : k if v.external]) == 0 || (var.notifications.sns_topic_arn != "" && contains(var.notifications.events, "import_expiry"))

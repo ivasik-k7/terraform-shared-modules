@@ -1,6 +1,3 @@
-# Who can do what: roles, separation of duties, service presets. Assertions
-# match statements by content, so renaming a Sid cannot make them pass.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -24,10 +21,6 @@ variables {
   name           = "payments"
   deployers      = ["arn:aws:iam::111122223333:role/workspace"]
 }
-
-# ---------------------------------------------------------------------------
-# Roles
-# ---------------------------------------------------------------------------
 
 run "iam_delegation_is_the_account_root_with_kms_star" {
   command = plan
@@ -299,10 +292,6 @@ run "strict_mode_with_account_wide_services_warns" {
 
   expect_failures = [check.strict_mode_keeps_services_named]
 }
-
-# ---------------------------------------------------------------------------
-# Service presets
-# ---------------------------------------------------------------------------
 
 run "every_caller_path_preset_names_the_documented_service" {
   command = plan

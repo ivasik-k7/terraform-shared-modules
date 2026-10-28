@@ -1,0 +1,8 @@
+# Accepted trivy findings, one ID per line. Each entry carries, on the lines
+# above it: the module, why the finding does not apply or is accepted, who
+# accepted it, and the date to revisit. An entry without a reason is a finding.
+#
+# Example:
+#   # modules/bastion-isolated: no egress by design is enforced by the caller's
+#   # network firewall, not this SG. Accepted by platform 2026-10-28, revisit 2027-04-28.
+#   AVD-AWS-0104

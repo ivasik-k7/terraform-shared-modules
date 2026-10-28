@@ -1,13 +1,9 @@
-# A key set for a regulated workload: data under customer-supplied (imported)
-# key material, a signing key in yearly generations, tenant isolation by
-# encryption context, algorithm limits, and the stricter guardrails.
-
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.73.0, < 6.0.0"
+      version = ">= 5.73.0, < 7.0.0"
     }
   }
 }
@@ -54,8 +50,6 @@ module "kms" {
   key_custodians = [var.hsm_ceremony_role_arn]
 
   keys = {
-    # Customer-supplied material: the key is created pending import, and the
-    # ceremony role imports the material out of band.
     data = {
       origin                     = "EXTERNAL"
       purpose                    = "database"
@@ -64,8 +58,6 @@ module "kms" {
       encryption_context_values  = { tenant = ["$${aws:PrincipalTag/tenant}"] }
     }
 
-    # Signing keys cannot rotate automatically: a new generation each year.
-    # Verifiers keep the old public keys; signing moves to the newest.
     statements = {
       purpose            = "signing"
       generations        = ["2025", "2026"]
@@ -91,7 +83,6 @@ module "kms" {
     events        = ["deletion", "rotation", "import_expiry", "schedule_deletion", "disable", "policy_change"]
   }
 
-  # The account has an organization trail.
   acknowledged_checks = ["cloudtrail_events_need_a_trail"]
 
   required_tag_keys = ["DataClassification"]

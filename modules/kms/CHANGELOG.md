@@ -15,6 +15,9 @@ compiled from roles, service presets, consumer contracts and guardrails.
 
 ### Added
 
+- AWS provider 6.x: the range is `>= 5.73.0, < 7.0.0`, so the module can share
+  a workspace with modules that need either major. The suite runs on 5.100.0
+  and 6.x; `modules/replica` follows the same range.
 - `keys`: a map of keys, default `{ main = {} }`, so `name` alone plans.
   Per key: `purpose` profiles (logs, secrets, database, storage, messaging,
   signing, mac, dnssec) that set the kind and presets; `spec` and `usage`,

@@ -1,7 +1,3 @@
-# Consumer contracts: how requirements are matched, compiled, reported and
-# refused. Runs that match on key ARNs use command = apply, because a mocked
-# ARN is only known after apply.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -45,10 +41,6 @@ variables {
     logs = { services = ["logs"] }
   }
 }
-
-# ---------------------------------------------------------------------------
-# Compiled
-# ---------------------------------------------------------------------------
 
 run "a_requirement_compiles_into_the_key_it_names" {
   command = apply
@@ -200,10 +192,6 @@ run "a_multi_region_key_id_is_an_identifier" {
     error_message = "an mrk- key ID must match, not be reported as prose."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Reported
-# ---------------------------------------------------------------------------
 
 run "a_requirement_for_another_key_set_is_unmatched" {
   command = apply
@@ -420,10 +408,6 @@ run "a_requirement_without_a_key_is_not_applicable" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Refused
-# ---------------------------------------------------------------------------
-
 run "a_public_principal_is_refused" {
   command = plan
 
@@ -510,11 +494,6 @@ run "a_colliding_sid_is_refused" {
   expect_failures = [aws_kms_key_policy.this]
 }
 
-# ---------------------------------------------------------------------------
-# Refusals that pattern-match: IAM action names are case-insensitive and may
-# end in *, so an exact-match list alone lets PutKeyPolicy through.
-# ---------------------------------------------------------------------------
-
 run "a_wildcard_covering_a_management_action_is_refused" {
   command = plan
 
@@ -554,8 +533,6 @@ run "a_management_action_in_another_case_is_refused" {
 run "a_refusal_stops_the_first_plan_before_any_key_exists" {
   command = plan
 
-  # The key ARN this requirement names is unknown until apply; the refusal
-  # must not wait for it.
   variables {
     consumers = {
       evil = [{

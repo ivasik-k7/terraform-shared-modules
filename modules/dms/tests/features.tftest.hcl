@@ -1,9 +1,3 @@
-# The features beyond the core migration: validation-only tasks and an
-# honest validation posture, premigration assessments, acknowledged checks and
-# the key policy contract.
-#
-# Plan runs first; the apply runs at the end need task ARNs.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -14,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -45,9 +37,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -84,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -99,16 +87,10 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
-
-
-# ---------------------------------------------------------------------------
-# Validation-only tasks
-# ---------------------------------------------------------------------------
 
 run "a_validation_only_task_validates_and_never_prepares_the_target" {
   command = plan
@@ -301,10 +283,6 @@ run "an_s3_target_partitioned_by_month_cannot_be_validated" {
   expect_failures = [check.validation_is_claimed_where_it_cannot_run]
 }
 
-# ---------------------------------------------------------------------------
-# Acknowledged checks
-# ---------------------------------------------------------------------------
-
 run "an_acknowledged_check_is_silent_and_recorded" {
   command = plan
 
@@ -338,10 +316,6 @@ run "acknowledging_a_check_that_does_not_exist_is_rejected" {
 
   expect_failures = [var.acknowledged_checks]
 }
-
-# ---------------------------------------------------------------------------
-# Key policy requirements
-# ---------------------------------------------------------------------------
 
 run "the_key_owner_is_told_what_each_key_must_allow" {
   command = plan
@@ -377,7 +351,6 @@ run "create_false_leaves_the_key_contract_null" {
   }
 }
 
-# Apply, because the module-created role ARNs in principals.arns are unknown at plan.
 run "every_key_requirement_carries_the_v2_contract" {
   command = apply
 
@@ -420,10 +393,6 @@ run "every_key_requirement_carries_the_v2_contract" {
     error_message = "kms:ViaService on a service-only statement never matches."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Premigration assessment
-# ---------------------------------------------------------------------------
 
 run "the_assessment_role_is_scoped_to_its_prefix" {
   command = plan
@@ -528,8 +497,6 @@ run "the_assessment_command_always_encrypts_and_names_the_task" {
     error_message = "the command names the task, writes under the migration's prefix, and never omits the encryption mode - AWS stores results unencrypted without it."
   }
 
-  # Every mocked task returns the same ARN, so the ARN value proves nothing
-  # about which task it came from; the identifier is computed from config.
   assert {
     condition     = keys(output.validation_task_arns) == ["app-check"] && aws_dms_replication_task.validation["app-check"].replication_task_id == "test-migration-app-check"
     error_message = "validation task ARNs are exposed per validation task, keyed by its name."

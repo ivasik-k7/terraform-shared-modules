@@ -1,16 +1,3 @@
-# Everything is nullable = false, and anything that reaches an AWS API or lands
-# in state gets a validation.
-#
-# Two rules if you add one:
-#
-#   - Ternaries, can(), or alltrue([for ...]). Never `x == "" || f(x)` - 1.9
-#     evaluates both sides. tests/lint_validations.py enforces it.
-#
-#   - DMS silently ignores what it does not understand. Unknown keys in task
-#     settings, a table mapping with no selection rule, a misspelled transform:
-#     all of these produce a task that runs, reports success, and moves nothing.
-#     Validate the shape here rather than discovering it after a 6-hour load.
-
 variable "create" {
   description = "Master switch. false plans and applies cleanly to nothing. The one read that still happens is the account_service_roles_exist lookup (iam:ListRoles): a check-scoped data source cannot be switched off, and a failed lookup is a warning, not an error."
   type        = bool
@@ -24,7 +11,6 @@ variable "name" {
   nullable    = false
 
   validation {
-    # "dms-tasks-<name>" is the log group, and replication identifiers cap at 60.
     condition     = can(regex("^[a-z][a-z0-9-]{1,40}$", var.name))
     error_message = "name must be 2-41 chars, lowercase alphanumeric or hyphen, starting with a letter."
   }
@@ -44,10 +30,6 @@ variable "tags" {
     error_message = "tags keys must be <= 128 chars, values <= 256 chars, and no key may use the reserved \"aws:\" prefix."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Compute
-# ---------------------------------------------------------------------------
 
 variable "acknowledged_checks" {
   description = "Advisory checks this caller has decided to live with, by name - for example \"replication_survives_an_az\" on a single-AZ dev migration. An acknowledged check stops warning in plans and HCP Terraform health assessments, and is listed in output.governance so a reviewer still sees the decision."
@@ -243,10 +225,6 @@ variable "serverless" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Network (BYO)
-# ---------------------------------------------------------------------------
-
 variable "subnet_ids" {
   description = "Subnets for the replication subnet group. DMS requires at least two, in different AZs, and they must have a route to both the source and the target - see output.network_contract."
   type        = list(string)
@@ -283,10 +261,6 @@ variable "security_group_ids" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Encryption
-# ---------------------------------------------------------------------------
-
 variable "kms_key_arn" {
   description = "CMK for replication instance storage, which is where cached changes and unshipped LOBs sit. Empty uses the AWS-managed DMS key. Endpoints can override this per endpoint. Set it BEFORE the first apply: the key is immutable on the replication instance and on every endpoint that inherits it, and a replaced endpoint replaces every task that uses it - so changing it on a live migration replaces the instance, the endpoints and the tasks, and CDC starts over (RUNBOOK section 6a)."
   type        = string
@@ -306,15 +280,6 @@ variable "require_cmk" {
   nullable    = false
 }
 
-# ---------------------------------------------------------------------------
-# Endpoints
-#
-# Credentials are the whole security story here. username/password on a DMS
-# endpoint are written to Terraform state in plaintext and sit in the API
-# response forever, so the module refuses them unless you say otherwise. The
-# supported path is a Secrets Manager secret plus a role DMS assumes to read it.
-# ---------------------------------------------------------------------------
-
 variable "endpoints" {
   description = <<-EOT
     Database endpoints, keyed by a name you choose. Keys become endpoint ids and
@@ -324,8 +289,9 @@ variable "endpoints" {
 
       secret_arn = "arn:aws:secretsmanager:..."   the supported path. DMS reads
                    the secret itself, nothing lands in state, and rotation is
-                   possible. The module creates the role DMS assumes unless you
-                   supply secret_access_role_arn.
+                   possible. The module creates the role DMS assumes; to bring
+                   one, set create_secret_role = false and
+                   secret_access_role_arn.
 
       username / password                          plaintext in state. Refused
                    unless allow_plaintext_credentials = true.
@@ -349,49 +315,26 @@ variable "endpoints" {
     S3 targets are a different resource with a different shape; use s3_targets.
   EOT
   type = map(object({
-    role   = string
-    engine = string
-    # With secret_arn set, server_name and port do NOT reach DMS - the secret
-    # carries host and port. They are still worth filling in:
-    # output.network_contract is built from them, and that is what the firewall
-    # request is made of. database_name reaches DMS on both paths except for
-    # the MySQL family on the secret path (see the description). Oracle needs
-    # it (SID or service name) on either path.
+    role          = string
+    engine        = string
     server_name   = optional(string, "")
     port          = optional(number, 0)
     database_name = optional(string, "")
 
     secret_arn             = optional(string, "")
+    create_secret_role     = optional(bool, true)
     secret_access_role_arn = optional(string, "")
     secret_kms_key_arn     = optional(string, "")
     username               = optional(string, "")
     password               = optional(string, "")
 
-    ssl_mode = optional(string, "verify-full")
-    # A key from the certificates variable, resolved inside the module.
-    # certificate_arn is for a CA that already exists in DMS. Referencing a
-    # module-created certificate by ARN from here would be a dependency cycle,
-    # which is why the key form exists.
+    ssl_mode        = optional(string, "verify-full")
     certificate_key = optional(string, "")
     certificate_arn = optional(string, "")
-    # Immutable on the endpoint: changing it replaces the endpoint and every
-    # task that uses it. Falls back to the module's kms_key_arn.
-    kms_key_arn = optional(string, "")
+    kms_key_arn     = optional(string, "")
 
     extra_connection_attributes = optional(string, "")
 
-    # PostgreSQL knobs that change whether replication works at all.
-    #
-    # heartbeat_*, slot_name and capture_ddls are SOURCE-only - applied to a
-    # target DMS would try to create a heartbeat table in the database you are
-    # migrating into. The module only sends them when role = "source".
-    #
-    # after_connect_script and execute_timeout apply to either end, and the
-    # target is where after_connect_script earns its keep: it runs on every
-    # connection DMS opens, so "SET session_replication_role = replica;"
-    # affects DMS's sessions only and nothing needs restoring afterwards. The
-    # DMS database user needs the privilege to set it (superuser, or on RDS and
-    # Aurora membership of rds_superuser).
     postgres = optional(object({
       heartbeat_enable             = optional(bool, true)
       heartbeat_frequency          = optional(number, 5)
@@ -401,9 +344,12 @@ variable "endpoints" {
       map_boolean_as_boolean       = optional(bool, true)
       fail_tasks_on_lob_truncation = optional(bool, true)
       after_connect_script         = optional(string, "")
-      # Seconds. Sent as given: the provider sends 0 for an unset value rather
-      # than leaving DMS's default (60), so the default is spelled out here.
+      # The provider sends 0 when unset; DMS documents a 60-second default.
+      # https://docs.aws.amazon.com/dms/latest/APIReference/API_PostgreSQLSettings.html
       execute_timeout = optional(number, 60)
+      # The provider sends 0 when unset; DMS documents a 32768 KB default.
+      # https://docs.aws.amazon.com/dms/latest/APIReference/API_PostgreSQLSettings.html
+      max_file_size = optional(number, 32768)
     }), {})
   }))
   default  = {}
@@ -434,7 +380,6 @@ variable "endpoints" {
   }
 
   validation {
-    # Exactly one credential source. Both set is ambiguous and DMS picks one.
     condition = alltrue([
       for k, e in var.endpoints :
       e.secret_arn != "" ? (e.username == "" && e.password == "") : true
@@ -443,12 +388,27 @@ variable "endpoints" {
   }
 
   validation {
+    condition     = alltrue([for e in values(var.endpoints) : e.secret_arn != "" || e.username != ""])
+    error_message = "every endpoint needs a credential: secret_arn (the supported path), or username and password with allow_plaintext_credentials."
+  }
+
+  validation {
+    condition = alltrue([for e in values(var.endpoints) : (
+      e.username != "" ? e.secret_access_role_arn == "" : (e.create_secret_role ? e.secret_access_role_arn == "" : e.secret_access_role_arn != "")
+    )])
+    error_message = "endpoints[*]: secret_access_role_arn goes with create_secret_role = false (and only with secret_arn); with create_secret_role = true the module creates the role and secret_access_role_arn must be empty."
+  }
+
+  validation {
+    condition     = alltrue([for e in values(var.endpoints) : e.postgres.max_file_size >= 1 && floor(e.postgres.max_file_size) == e.postgres.max_file_size])
+    error_message = "endpoints[*].postgres.max_file_size is a whole number of KB from 1 (0 leaves a full load stuck in \"Before load\")."
+  }
+
+  validation {
     condition = alltrue([
       for k, e in var.endpoints :
       e.secret_arn == "" ? true : can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", e.secret_arn))
     ])
-    # The FULL ARN, with the six random characters: the module-created role's
-    # policy names this exact ARN, and a partial one does not match it.
     error_message = "endpoints[*].secret_arn must be the full Secrets Manager ARN, ending in the six random characters (…:secret:name-AbCdEf). A partial ARN is accepted by the DMS API but does not match the secret role's policy, so the endpoint's connection test fails with a permissions error."
   }
 
@@ -461,9 +421,6 @@ variable "endpoints" {
   }
 
   validation {
-    # A secret encrypted with a CMK needs kms:Decrypt as well as
-    # GetSecretValue, and the failure without it is an endpoint that tests
-    # fine and a task that cannot start.
     condition = alltrue([
       for k, e in var.endpoints :
       e.secret_kms_key_arn == "" ? true : can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/", e.secret_kms_key_arn))
@@ -480,10 +437,8 @@ variable "endpoints" {
   }
 
   validation {
-    # AWS DMS supports a different set of SSL modes per engine (the "Using SSL"
-    # table in the DMS user guide). An unsupported mode fails at endpoint
-    # create or connection test - on Oracle, verify-full is refused outright,
-    # and the only escape left would be ssl_mode = "none".
+    # The SSL modes DMS supports per engine.
+    # https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Security.SSL.html
     condition = alltrue([
       for k, e in var.endpoints : contains(lookup({
         aurora    = ["none", "verify-ca", "verify-full"]
@@ -501,7 +456,6 @@ variable "endpoints" {
   }
 
   validation {
-    # verify-ca and verify-full mean nothing without a CA to verify against.
     condition = alltrue([
       for k, e in var.endpoints :
       contains(["verify-ca", "verify-full"], e.ssl_mode) ? (e.certificate_arn != "" || e.certificate_key != "") : true
@@ -518,8 +472,6 @@ variable "endpoints" {
   }
 
   validation {
-    # Cross-variable validation: the key has to name a certificate this module
-    # is actually creating.
     condition = alltrue([
       for k, e in var.endpoints :
       e.certificate_key == "" ? true : contains(keys(var.certificates), e.certificate_key)
@@ -528,8 +480,6 @@ variable "endpoints" {
   }
 
   validation {
-    # This field is free text that DMS passes to the driver, and it is a
-    # well-worn place to hide a password. It is also stored in plain state.
     condition = alltrue([
       for k, e in var.endpoints :
       !can(regex("(?i)(password|pwd|secret|auth_?token)\\s*=", e.extra_connection_attributes))
@@ -581,13 +531,14 @@ variable "s3_targets" {
     S3 target endpoints, keyed by name. Separate from endpoints because S3 is a
     different resource with a different shape.
 
-    The bucket is yours. The module creates the role DMS assumes to write to it
-    unless you supply service_access_role_arn, and scopes that role to the
-    bucket and prefix given here.
+    The bucket is yours. The module creates the role DMS assumes to write to it,
+    scoped to the bucket and prefix given here; to bring one, set
+    create_role = false and service_access_role_arn.
   EOT
   type = map(object({
     bucket_name             = string
     bucket_folder           = optional(string, "")
+    create_role             = optional(bool, true)
     service_access_role_arn = optional(string, "")
 
     data_format      = optional(string, "parquet")
@@ -599,11 +550,7 @@ variable "s3_targets" {
 
     date_partition_enabled  = optional(bool, true)
     date_partition_sequence = optional(string, "YYYYMMDD")
-    # Empty: CDC files land beside the full load under the date partitions.
-    # DMS refuses CdcPath together with date partitioning or Glue catalog
-    # generation; it belongs with PreserveTransactions, which the module does
-    # not expose.
-    cdc_path = optional(string, "")
+    cdc_path                = optional(string, "")
 
     include_op_for_full_load = optional(bool, true)
     timestamp_column_name    = optional(string, "dms_ingest_ts")
@@ -611,6 +558,11 @@ variable "s3_targets" {
   }))
   default  = {}
   nullable = false
+
+  validation {
+    condition     = alltrue([for t in values(var.s3_targets) : t.create_role ? t.service_access_role_arn == "" : t.service_access_role_arn != ""])
+    error_message = "s3_targets[*]: service_access_role_arn goes with create_role = false; with create_role = true the module creates the role and service_access_role_arn must be empty."
+  }
 
   validation {
     condition = alltrue([
@@ -662,8 +614,6 @@ variable "s3_targets" {
   }
 
   validation {
-    # SSE_KMS without a key means the AWS-managed S3 key, which cannot carry a
-    # key policy of yours and cannot be shared cross-account.
     condition = alltrue([
       for k, s in var.s3_targets :
       s.kms_key_arn == "" ? true : can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/", s.kms_key_arn))
@@ -705,18 +655,6 @@ variable "certificates" {
     error_message = "certificates[*].pem must contain a PEM certificate block."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Tasks
-#
-# replication_task_settings is a JSON blob, and DMS ignores keys it does not
-# recognise WITHOUT ERROR. A typo in "EnableValidation" is a task that runs,
-# reports success, and validates nothing. So the module renders that JSON from
-# typed inputs instead of taking it as a string, checks whatever raw_overrides
-# adds on top against the documented keys at plan (check
-# raw_overrides_use_known_task_settings), and tests/lint_task_settings.py
-# checks the shipped JSON documents the same way.
-# ---------------------------------------------------------------------------
 
 variable "tasks" {
   description = <<-EOT
@@ -764,38 +702,18 @@ variable "tasks" {
     start              = optional(bool, false)
 
     settings = optional(object({
-      logging_enabled    = optional(bool, true)
-      log_level          = optional(string, "LOGGER_SEVERITY_DEFAULT")
-      validation_enabled = optional(bool, true)
-      # 5 is the DMS default. Every extra thread is another concurrent query
-      # against a source someone else operates.
-      validation_threads = optional(number, 5)
-      # Empty lets DMS choose - from engine 3.5.4 it selects GROUP_LEVEL itself
-      # on Oracle/SQL Server to PostgreSQL, which is materially faster.
-      validation_mode = optional(string, "")
-      # Oracle -> PostgreSQL with a non-C primary-key collation reports false
-      # mismatches without this, and suspends validation once it has enough of
-      # them. Defaults true because that pairing is this module's main path.
+      logging_enabled              = optional(bool, true)
+      log_level                    = optional(string, "LOGGER_SEVERITY_DEFAULT")
+      validation_enabled           = optional(bool, true)
+      validation_threads           = optional(number, 5)
+      validation_mode              = optional(string, "")
       handle_collation_diff        = optional(bool, true)
       validation_failure_max       = optional(number, 10000)
       validation_table_failure_max = optional(number, 1000)
 
-      # DO_NOTHING (the default) means DMS creates nothing on the target: the
-      # schema has to exist before the task starts, and a table that does not
-      # suspends itself rather than failing the task, which reads as a partial
-      # success. governance.tasks_expecting_a_prebuilt_target lists the tasks
-      # this applies to. Building that schema is the pipeline's job; this
-      # module runs no SQL.
-      target_table_prep_mode = optional(string, "DO_NOTHING")
-      stop_after_full_load   = optional(bool, false)
-      # Pauses a full-load-and-cdc task after the load and BEFORE the changes
-      # cached during it are applied: the window to build the indexes CDC
-      # needs (RUNBOOK section 4). Resume the task to continue.
-      stop_before_cached_changes = optional(bool, false)
-      # Oracle source with CDC: a transaction still open
-      # transaction_consistency_timeout seconds after the task starts is
-      # skipped by DMS, and its changes never reach the target. true fails the
-      # task instead, so the start is retried rather than silently lossy.
+      target_table_prep_mode          = optional(string, "DO_NOTHING")
+      stop_after_full_load            = optional(bool, false)
+      stop_before_cached_changes      = optional(bool, false)
       fail_on_open_transaction        = optional(bool, true)
       transaction_consistency_timeout = optional(number, 600)
       max_full_load_subtasks          = optional(number, 8)
@@ -808,11 +726,6 @@ variable "tasks" {
       batch_apply_enabled   = optional(bool, false)
       parallel_load_threads = optional(number, 0)
 
-      # Named by default. DMS writes awsdms_apply_exceptions here - failing rows
-      # with their data and SQL - and in the target's default schema that is
-      # production data in an unscoped table. The schema must exist on the
-      # target, or the migrating user must be able to create it - create it
-      # together with the target schema, before the task starts.
       control_schema      = optional(string, "dms_control")
       task_recovery_table = optional(bool, false)
       apply_error_max     = optional(number, 0)
@@ -855,7 +768,6 @@ variable "tasks" {
   }
 
   validation {
-    # No selection rule means no table matches, and the task reports success.
     condition = alltrue([
       for k, t in var.tasks :
       can(jsondecode(t.table_mappings).rules) ? length([
@@ -867,7 +779,6 @@ variable "tasks" {
   }
 
   validation {
-    # DMS keys its own state by rule-id; duplicates silently drop rules.
     condition = alltrue([
       for k, t in var.tasks :
       can(jsondecode(t.table_mappings).rules) ? length(distinct([
@@ -919,9 +830,6 @@ variable "tasks" {
   }
 
   validation {
-    # "[]", "null" and "5" are valid JSON and are not mergeable. Without this
-    # the plan dies inside locals on keys(), naming neither the task nor the
-    # field.
     condition = alltrue([
       for k, t in var.tasks :
       can(jsondecode(t.settings.raw_overrides)) ? can(keys(jsondecode(t.settings.raw_overrides))) : false
@@ -938,8 +846,6 @@ variable "tasks" {
   }
 
   validation {
-    # AWS documents 50000 as the ceiling; above it the setting is rejected at
-    # task start rather than at apply.
     condition = alltrue([
       for k, t in var.tasks : t.settings.commit_rate >= 1 && t.settings.commit_rate <= 50000
     ])
@@ -947,8 +853,6 @@ variable "tasks" {
   }
 
   validation {
-    # AWS: "Increasing the value for LobChunkSize above 64 kilobytes can cause
-    # task failures."
     condition = alltrue([
       for k, t in var.tasks : t.settings.lob_chunk_size_kb >= 1 && t.settings.lob_chunk_size_kb <= 64
     ])
@@ -970,8 +874,6 @@ variable "tasks" {
   }
 
   validation {
-    # cdc_start_time and cdc_start_position are mutually exclusive, and DMS
-    # takes the position if both arrive.
     condition = alltrue([
       for k, t in var.tasks :
       length([for s in [t.cdc_start_time, t.cdc_start_position] : s if s != ""]) <= 1
@@ -1147,14 +1049,6 @@ variable "allow_destructive_target_prep" {
   nullable    = false
 }
 
-# ---------------------------------------------------------------------------
-# Observability
-#
-# A stopped CDC task is the failure that matters. The target stops receiving
-# changes, nothing errors, dashboards stay green, and the gap is only discovered
-# at cutover - by which point the source has moved on.
-# ---------------------------------------------------------------------------
-
 variable "sns_topic_arn" {
   description = "Topic for DMS event subscriptions and CloudWatch alarms. Empty disables both, which means a failed task tells nobody."
   type        = string
@@ -1180,7 +1074,7 @@ variable "sns_topic_kms_key_arn" {
 }
 
 variable "create_event_subscriptions" {
-  description = "Subscribe to DMS instance and task events. No-op without sns_topic_arn."
+  description = "Subscribe to DMS instance and task events (serverless: forward replication failures from EventBridge). Needs sns_topic_arn; set false to run without one."
   type        = bool
   default     = true
   nullable    = false
@@ -1189,10 +1083,8 @@ variable "create_event_subscriptions" {
 variable "instance_event_categories" {
   description = "Replication instance event categories to notify on."
   type        = list(string)
-  # failover: multi_az defaults to true, and a failover mid-load is worth
-  # knowing about.
-  default  = ["failure", "low storage", "maintenance", "configuration change", "failover"]
-  nullable = false
+  default     = ["failure", "low storage", "maintenance", "configuration change", "failover"]
+  nullable    = false
 
   validation {
     condition = alltrue([
@@ -1219,7 +1111,7 @@ variable "task_event_categories" {
 }
 
 variable "create_alarms" {
-  description = "Create the CloudWatch alarms that catch a migration going wrong quietly: CDC latency on both sides, instance storage, CPU, and memory. No-op without sns_topic_arn."
+  description = "Create the CloudWatch alarms that catch a migration going wrong quietly: CDC latency on both sides, instance storage, CPU, and memory. Provisioned mode only. Needs sns_topic_arn; set false to run without one."
   type        = bool
   default     = true
   nullable    = false
@@ -1298,10 +1190,6 @@ variable "log_retention_days" {
     error_message = "log_retention_days must be 0 or one of the retention periods CloudWatch Logs accepts."
   }
 }
-
-# ---------------------------------------------------------------------------
-# IAM
-# ---------------------------------------------------------------------------
 
 variable "create_account_service_roles" {
   description = <<-EOT

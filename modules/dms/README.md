@@ -79,9 +79,15 @@ to whoever owns IAM, and `kms_key_policy_requirements` to the key owners.
 | Component | Supported | What a workspace must do |
 |---|---|---|
 | Terraform | `>= 1.9.0` | Set the workspace's Terraform version to 1.9 or later. Conditions use ternaries because 1.9 evaluates both sides of `\|\|` and `&&` |
-| `hashicorp/aws` | `>= 5.70.0, < 6.0.0` | Commit the `.terraform.lock.hcl` for a 5.x provider; the module is validated on 5.100.0. A 6.x provider is not supported |
+| `hashicorp/aws` | `>= 5.70.0, < 7.0.0` | Commit the `.terraform.lock.hcl`; the suite runs on 5.100.0 and 6.x, so the module can share a workspace with modules on either major |
 | Account | `dms-vpc-role` and `dms-cloudwatch-logs-role` | Fixed names, one set per account. Create them once in the landing zone, or set `create_account_service_roles = true` in exactly one module. The check `account_service_roles_exist` warns at plan when either is missing (the plan principal needs `iam:ListRoles`) |
 | Network | VPC endpoints for `secretsmanager`, `kms`, `logs`, `sns` as used; an `s3` gateway endpoint for an S3 target | The module creates no network resources. `output.network_contract` lists what the configuration needs |
+
+Secrets, roles, keys and the topic can be created in the same root as the
+module. Which roles, subscriptions and alarms exist is decided by map keys
+and switches (`create_secret_role`, `s3_targets[*].create_role`,
+`create_event_subscriptions`, `create_alarms`), never by whether an ARN is
+empty, so ARNs unknown at plan do not break the plan.
 
 ## What the module refuses
 
@@ -91,6 +97,10 @@ first task start.
 
 | Refused | Because |
 |---|---|
+| An endpoint with neither `secret_arn` nor `username` | DMS would be created with no credential |
+| `secret_access_role_arn` without `create_secret_role = false`, or the reverse; the same for `s3_targets[*].service_access_role_arn` and `create_role` | The module would create a second role and ignore yours, or have no role to give DMS |
+| `create_event_subscriptions` or `create_alarms` on without `sns_topic_arn` | Nothing to notify. Both default to `true`; set them `false` to run without a topic |
+| `postgres.max_file_size` below 1 | With `0`, which the provider sends when unset, a full load into PostgreSQL sits in "Before load" with no rows. The module sends DMS's default, 32768 KB |
 | `username`/`password` on an endpoint, or a password in `extra_connection_attributes` | They reach state and `DescribeEndpoints` in plaintext. Use `secret_arn`, or set `allow_plaintext_credentials = true` |
 | `ssl_mode` of `none` or `require` | Cleartext or unverified. Needs `allow_insecure_transport = true`. SQL Server's only encrypted modes are `require` and `verify-full`, so on SQL Server `verify-full` is the path that needs no acknowledgement |
 | `verify-ca` or `verify-full` with no certificate | Nothing to verify against |
@@ -135,7 +145,7 @@ for a reviewer. All are silent when `create = false`.
 
 | Check | Warns when |
 |---|---|
-| `somebody_hears_a_failed_task` | tasks exist and there is no `sns_topic_arn` |
+| `somebody_hears_a_failed_task` | tasks exist and `create_event_subscriptions` is off |
 | `serverless_replication_is_not_watched_by_this_module` | `compute_mode = "serverless"` |
 | `control_tables_have_their_own_schema` | a task writes DMS control tables to the target's default schema |
 | `debug_logging_is_temporary` | a task logs at DEBUG or DETAILED_DEBUG in its merged settings |
@@ -307,7 +317,7 @@ written to be read there.
 | `name` | required | Prefixes every resource; also the log group suffix |
 | `subnet_ids`, `security_group_ids` | required | Two AZs minimum, routed to both databases; egress only |
 | `compute_mode` | `"provisioned"` | `"serverless"` is not watched by this module |
-| `endpoints` | `{}` | `secret_arn` is the credential path; `ssl_mode` is validated per engine |
+| `endpoints` | `{}` | `secret_arn` is the credential path, with a module-created role unless `create_secret_role = false`; `ssl_mode` is validated per engine |
 | `s3_targets` | `{}` | S3 is a separate resource with its own shape |
 | `certificates` | `{}` | `pem` or `wallet`; referenced by `certificate_key` |
 | `tasks` | `{}` | Typed settings; mappings validated at plan |
@@ -315,7 +325,7 @@ written to be read there.
 | `premigration_assessment` | disabled | Role plus per-task commands; provisioned only |
 | `kms_key_arn`, `require_cmk` | `""`, `false` | Storage, endpoints, logs. Set the key before the first apply: changing it replaces the instance, the endpoints and the tasks |
 | `multi_az`, `engine_version` | `true`, `""` | Pin the version; minor upgrades are off by default |
-| `sns_topic_arn` | `""` | Without it nothing is watching |
+| `sns_topic_arn` | `""` | Required while `create_event_subscriptions` or `create_alarms` is on (both default `true`) |
 | `sns_topic_kms_key_arn` | `""` | The topic's customer key, so `kms_key_policy_requirements` can say what it must allow |
 | `acknowledged_checks` | `[]` | Advisory checks you have decided to live with |
 | `allow_plaintext_credentials`, `allow_insecure_transport`, `allow_destructive_target_prep` | `false` | Each acknowledges one refusal |
@@ -381,6 +391,10 @@ written to be read there.
   nothing the mappings excluded is checked.
 - **`LoopbackPreventionSettings` is not typed**, so a bidirectional rollback
   configuration needs `raw_overrides`.
+- **A change to an endpoint's `postgres` block replaces the endpoint and its
+  tasks on both provider majors.** Provider 5.x sends `postgres_settings` on
+  create only; 6.x would update them in place, but one behaviour across both
+  is kept.
 - **Credential rotation is not picked up mid-task.** DMS caches the credential
   at connection time.
 
@@ -398,7 +412,7 @@ provider floor. Minor releases add optional inputs, outputs, checks and alarms;
 patches change no plan. A deprecated input keeps working until the next major
 release, and `moved` blocks are never removed, so a workspace can skip versions.
 
-Supported: Terraform `>= 1.9.0` and `hashicorp/aws` `>= 5.70.0, < 6.0.0`.
+Supported: Terraform `>= 1.9.0` and `hashicorp/aws` `>= 5.70.0, < 7.0.0`.
 
 Tests: `terraform test` plan tests (`tests/`), `tests/lint_task_settings.py`
 (unknown settings keys, contradictory LOB flags, mappings without a selection

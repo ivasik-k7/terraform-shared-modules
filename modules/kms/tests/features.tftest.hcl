@@ -1,7 +1,3 @@
-# Regulated-workload features: imported key material (BYOK), key generations
-# for kinds that cannot rotate, attribute-based access, algorithm limits, the
-# stricter guardrails, and the compliance snippets.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -49,10 +45,6 @@ variables {
   name           = "payments"
   deployers      = ["arn:aws:iam::111122223333:role/workspace"]
 }
-
-# ---------------------------------------------------------------------------
-# Imported key material
-# ---------------------------------------------------------------------------
 
 run "imported_material_makes_an_external_key" {
   command = apply
@@ -144,10 +136,6 @@ run "origin_is_validated" {
   expect_failures = [var.keys]
 }
 
-# ---------------------------------------------------------------------------
-# Generations
-# ---------------------------------------------------------------------------
-
 run "generations_are_keys_and_the_last_is_active" {
   command = apply
 
@@ -220,10 +208,6 @@ run "generation_names_are_validated" {
   expect_failures = [var.keys]
 }
 
-# ---------------------------------------------------------------------------
-# Attribute-based access and algorithms
-# ---------------------------------------------------------------------------
-
 run "context_values_isolate_tenants" {
   command = plan
 
@@ -286,10 +270,6 @@ run "an_unknown_algorithm_is_refused" {
 
   expect_failures = [var.keys]
 }
-
-# ---------------------------------------------------------------------------
-# Guardrails
-# ---------------------------------------------------------------------------
 
 run "the_stricter_guardrails" {
   command = plan
@@ -354,10 +334,6 @@ run "an_administrator_who_uses_the_key_warns" {
 
   expect_failures = [check.duties_are_separated]
 }
-
-# ---------------------------------------------------------------------------
-# Compliance snippets
-# ---------------------------------------------------------------------------
 
 run "compliance_snippets_are_scoped_to_the_set" {
   command = apply

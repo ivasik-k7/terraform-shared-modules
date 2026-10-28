@@ -1,14 +1,12 @@
 terraform {
-  # 1.9 for cross-variable validation. It evaluates both sides of || and &&,
-  # so conditions are ternaries or can() - tests/lint_validations.py checks.
   required_version = ">= 1.9.0"
 
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # 5.73 fixed persistent validation errors when a malformed policy reached
-      # state; earlier 5.x can wedge a key whose policy AWS rejected once.
-      version = ">= 5.73.0, < 6.0.0"
+      # 5.73.0 fixes persistent validation errors when malformed aws_kms_key policy content reaches state.
+      # https://github.com/hashicorp/terraform-provider-aws/blob/v5.73.0/CHANGELOG.md
+      version = ">= 5.73.0, < 7.0.0"
     }
   }
 }

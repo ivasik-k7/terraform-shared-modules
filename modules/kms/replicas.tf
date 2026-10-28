@@ -1,9 +1,3 @@
-# What modules/replica needs to create the replicas, compiled here: their
-# policies name the replica region, carry its VPC endpoints and the consumer
-# requirements that name a replica ARN. modules/replica only creates
-# resources, so it can run in another workspace, in the disaster-recovery
-# region, and still apply while this region is down.
-
 locals {
   replica_blueprint = !local.create || length(local.replicated_keys) == 0 ? null : {
     schema  = 1

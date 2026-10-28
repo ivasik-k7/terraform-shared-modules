@@ -4,13 +4,14 @@ locals {
   ]...)
 }
 
-# Every argument forces a new grant: any change revokes and recreates it.
+# Every argument of aws_kms_grant forces replacement: a change revokes and recreates the grant.
+# https://github.com/hashicorp/terraform-provider-aws/blob/v5.100.0/internal/service/kms/grant.go
 resource "aws_kms_grant" "this" {
   for_each = local.create ? local.grants : {}
 
   name = each.value.name
-  # Through the policy resource: on destroy the grant is revoked before the
-  # policy is reset, while the deployer still holds RevokeGrant there.
+  # On destroy aws_kms_key_policy restores the default policy; this reference revokes the grant first.
+  # https://github.com/hashicorp/terraform-provider-aws/blob/v5.100.0/internal/service/kms/key_policy.go
   key_id             = aws_kms_key_policy.this[each.value.key].key_id
   grantee_principal  = each.value.grantee_principal
   operations         = each.value.operations

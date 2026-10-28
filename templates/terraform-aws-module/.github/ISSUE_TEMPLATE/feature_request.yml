@@ -1,0 +1,27 @@
+name: Feature
+description: Something the module should do, or refuse.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: The need
+      description: What you are trying to do, and what fails or is awkward today. The need, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: A proposed interface
+      description: Optional. The inputs you would set, as HCL.
+      render: hcl
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Would it change an existing caller's plan?
+      options:
+        - "No"
+        - "Yes"
+        - Not sure
+    validations:
+      required: true

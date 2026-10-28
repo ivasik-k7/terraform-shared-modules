@@ -126,6 +126,17 @@ S3 targets:
 
 ### Fixed
 
+- Secrets, roles and the topic created in the same root no longer fail the
+  plan with "Invalid for_each argument" (on apply, and again on destroy).
+  Which secret roles, S3 target roles, event subscriptions and alarms exist
+  was keyed on whether an ARN was empty, and an ARN from a resource in the
+  same root is unknown at plan. It is now keyed on `username`,
+  `create_secret_role`, `s3_targets[*].create_role`,
+  `create_event_subscriptions` and `create_alarms`.
+- PostgreSQL targets get `MaxFileSize` = 32768 KB, DMS's documented default.
+  The provider sent 0 when it was unset, and a full load then sat in "Before
+  load" with no rows. New `endpoints[*].postgres.max_file_size`.
+
 - `ssl_mode` is validated per engine, following the DMS SSL table: Oracle, Db2
   and Db2 z/OS `none` or `verify-ca` (Oracle with a wallet in
   `certificates[*].wallet`); MySQL, MariaDB and Aurora MySQL `none`,
@@ -220,6 +231,21 @@ S3 targets:
   before re-applying under the same name.
 
 ### Changed
+
+- AWS provider 6.x is supported: the range is `>= 5.70.0, < 7.0.0`, and the
+  suite runs on 5.100.0 and 6.x.
+- **BREAKING (validation):** `create_event_subscriptions` or `create_alarms`
+  on without `sns_topic_arn` is refused; both default to `true`, so a caller
+  with no topic sets them `false`. Before, they were silently skipped.
+  `somebody_hears_a_failed_task` now warns on `create_event_subscriptions`
+  being off.
+- **BREAKING (validation):** a brought `secret_access_role_arn` needs
+  `create_secret_role = false`, and a brought `s3_targets[*].service_access_role_arn`
+  needs `create_role = false`. An endpoint with no credential is refused.
+- **BREAKING (replacement, once):** PostgreSQL and Aurora PostgreSQL target
+  endpoints are replaced on the first plan after upgrading, with every task
+  on them, because `max_file_size` joins the settings hash that forces the
+  replacement. Source endpoints keep their hash and are not replaced.
 
 - **BREAKING (default):** `auto_minor_version_upgrade` defaults to `false`. A
   pinned `engine_version` with automatic minor upgrades fights itself: after AWS

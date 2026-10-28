@@ -1,5 +1,3 @@
-# Replicas, notifications and the reporting outputs.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -43,10 +41,6 @@ variables {
     sig  = { purpose = "signing" }
   }
 }
-
-# ---------------------------------------------------------------------------
-# Replicas
-# ---------------------------------------------------------------------------
 
 run "a_replica_is_compiled_for_its_region" {
   command = apply
@@ -154,10 +148,6 @@ run "a_multi_region_key_without_a_replica_warns" {
   expect_failures = [check.multi_region_keys_are_replicated]
 }
 
-# ---------------------------------------------------------------------------
-# Notifications
-# ---------------------------------------------------------------------------
-
 run "the_default_events_need_no_trail" {
   command = apply
 
@@ -259,10 +249,6 @@ run "replication_events_are_matched_where_they_are_logged" {
     error_message = "ReplicateKey is logged only in the primary's region: the replica region's rule must not wait for it."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Reporting outputs
-# ---------------------------------------------------------------------------
 
 run "the_cost_is_stated" {
   command = plan

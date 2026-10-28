@@ -1,6 +1,3 @@
-# Guardrails: every Deny statement's exact action list, principal and
-# exemptions, and the checks around them.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -230,10 +227,6 @@ run "policy_and_alias_protection_exempt_the_owners" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# The organization perimeter check
-# ---------------------------------------------------------------------------
-
 run "a_single_account_key_set_needs_no_perimeter" {
   command = plan
 
@@ -257,10 +250,6 @@ run "a_key_reachable_from_another_account_warns_without_a_perimeter" {
 
   expect_failures = [check.keys_have_an_organization_perimeter]
 }
-
-# ---------------------------------------------------------------------------
-# The examples' inputs plan with no refusal and no warning
-# ---------------------------------------------------------------------------
 
 run "the_minimal_call_plans_clean" {
   command = plan
@@ -322,10 +311,6 @@ run "the_strict_example_plans_clean" {
     error_message = "the strict example has no account-root statement and keeps the VPC endpoint deny."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Multi-Region keys: where they may go, and who owns the replicas
-# ---------------------------------------------------------------------------
 
 run "a_multi_region_key_replicates_only_to_the_replica_region" {
   command = plan

@@ -1,12 +1,9 @@
-# A workload's key set in one call: a data key for RDS and Secrets Manager,
-# a logs key for CloudWatch Logs and the alarm topic.
-
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.73.0, < 6.0.0"
+      version = ">= 5.73.0, < 7.0.0"
     }
   }
 }
@@ -53,8 +50,6 @@ module "kms" {
     organization_id = var.organization_id
   }
 
-  # Native KMS events only (deletion, rotation, imported material expiry):
-  # they need no CloudTrail trail.
   notifications = {
     sns_topic_arn = var.security_topic_arn
   }

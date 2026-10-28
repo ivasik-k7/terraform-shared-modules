@@ -1,0 +1,43 @@
+# Updates for what this repository pins. The 14-day cooldown keeps a release
+# out until the window in which a compromised or broken one is usually caught
+# has passed; security updates are not delayed.
+#
+# Terraform is deliberately absent: module provider constraints are ranges
+# whose two ends CI tests, and Dependabot would rewrite them. Bump a floor or
+# ceiling by hand, with its CHANGELOG entry.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker
+    directories:
+      - /modules/dms-orchestrator/runner
+      - /modules/gitlab-runner-fargate-v2/docker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: pip
+    directory: /modules/dms-orchestrator/runner
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: chore
+      include: scope

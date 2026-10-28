@@ -1,7 +1,4 @@
-# Keys: the minimal call, profiles and defaults, tags, custom key stores, and
-# every input validation and key-level precondition - one run per rule, each
-# input breaking exactly that rule.
-
+# mock_provider reports no replacement and calls no KMS API: policies and grants are asserted as data.
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -24,10 +21,6 @@ variables {
   replica_region = "eu-west-1"
   name           = "payments"
 }
-
-# ---------------------------------------------------------------------------
-# The minimal call
-# ---------------------------------------------------------------------------
 
 run "the_minimal_call_is_one_rotating_key_with_no_warnings" {
   command = plan
@@ -85,10 +78,6 @@ run "without_detection_nobody_is_exempt_and_the_check_says_so" {
     error_message = "detect_deployer = false with no deployers leaves no deployer."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Profiles and defaults
-# ---------------------------------------------------------------------------
 
 run "key_defaults_apply_and_a_key_overrides_them" {
   command = plan
@@ -336,10 +325,6 @@ run "the_planning_identity_without_a_role_is_no_deployer" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Key-level preconditions
-# ---------------------------------------------------------------------------
-
 run "a_grant_operation_the_key_kind_cannot_take_is_refused" {
   command = plan
   variables {
@@ -460,10 +445,6 @@ run "an_oversized_bootstrap_policy_is_refused" {
 
   expect_failures = [aws_kms_key.this]
 }
-
-# ---------------------------------------------------------------------------
-# Input validations: each input breaks exactly one rule
-# ---------------------------------------------------------------------------
 
 run "name_is_validated" {
   command = plan
@@ -877,10 +858,6 @@ run "notification_events_are_validated" {
   }
   expect_failures = [var.notifications]
 }
-
-# ---------------------------------------------------------------------------
-# create = false
-# ---------------------------------------------------------------------------
 
 run "create_false_plans_nothing_and_every_output_is_empty" {
   command = plan

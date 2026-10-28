@@ -1,0 +1,50 @@
+# Local guards, before a commit leaves the laptop: pre-commit install
+# CI runs the same tools, so skipping these only moves the failure later.
+# Revisions are commit SHAs (a tag can move); the version is the comment.
+# Update with: pre-commit autoupdate --freeze, after the 14-day cooldown.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+      - id: no-commit-to-branch
+        args: [--branch, main]
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: 80c8033123f6d6b9ccd1a9458562ea4180742af7 # frozen: v1.109.2
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+      - id: terraform_tflint
+        args: [--args=--config=__GIT_WORKING_DIR__/.tflint.hcl]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: lint-validations
+        name: no condition relies on short-circuit evaluation
+        entry: python3 tests/lint_validations.py .
+        language: system
+        pass_filenames: false
+        files: \.(tf|hcl)$
+      - id: check-consistency
+        name: code, README and examples agree
+        entry: python3 tests/check_consistency.py .
+        language: system
+        pass_filenames: false
+        files: \.(tf|md)$

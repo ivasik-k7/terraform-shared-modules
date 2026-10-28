@@ -1,14 +1,9 @@
-# A multi-Region key with a disaster-recovery replica. The key set compiles
-# the replica's policy for eu-west-1; modules/replica creates it there. Here
-# both live in one configuration; README shows the split into a separate
-# disaster-recovery workspace.
-
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.73.0, < 6.0.0"
+      version = ">= 5.73.0, < 7.0.0"
     }
   }
 }

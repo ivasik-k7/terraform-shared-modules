@@ -1,11 +1,3 @@
-# The fixes that the mocked suite could not see on its own, because each one
-# is about how AWS behaves rather than how the graph is shaped: SSL modes per
-# engine, the database name on the secret path, the IAM trust condition, the
-# task dimension CloudWatch publishes under, logging posture from the merged
-# settings, and the configurations DMS refuses at apply.
-#
-# Plan runs first; the apply runs at the end need the task ARN.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -16,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -47,9 +37,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -86,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -101,25 +87,14 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
 
-
-# ---------------------------------------------------------------------------
-# SSL modes DMS supports per engine
-# ---------------------------------------------------------------------------
-
-# Guards that had no failing-case run: each is tripped here on its own, with
-# every other input clean, so the address in expect_failures can mean only the
-# precondition named in the comment.
-
 run "availability_zone_with_multi_az_is_refused" {
   command = plan
 
-  # replication.tf: availability_zone is only meaningful when multi_az is false.
   variables {
     availability_zone = "eu-west-1a"
     multi_az          = true
@@ -131,7 +106,6 @@ run "availability_zone_with_multi_az_is_refused" {
 run "require_cmk_refuses_an_s3_target_without_a_customer_key" {
   command = plan
 
-  # endpoints.tf: require_cmk reaches S3 targets too.
   variables {
     require_cmk = true
     s3_targets = {
@@ -148,7 +122,6 @@ run "require_cmk_refuses_an_s3_target_without_a_customer_key" {
 run "require_cmk_in_serverless_refuses_the_aws_managed_storage_key" {
   command = plan
 
-  # replication.tf: in serverless mode the replication config is the only place the storage key is gated. Endpoints carry their own key so only that gate can fire.
   variables {
     compute_mode = "serverless"
     require_cmk  = true
@@ -190,7 +163,6 @@ run "require_cmk_in_serverless_refuses_the_aws_managed_storage_key" {
 run "cleartext_transport_warns_when_it_is_allowed" {
   command = plan
 
-  # observability.tf: allow_insecure_transport lifts the refusal; the check still says it out loud.
   variables {
     allow_insecure_transport = true
     endpoints = {
@@ -223,12 +195,6 @@ run "cleartext_transport_warns_when_it_is_allowed" {
 
   expect_failures = [check.transport_is_verified]
 }
-
-# ---------------------------------------------------------------------------
-# DMS Serverless supports a subset of engines (replication.tf precondition on
-# the subnet group). Validation is acknowledged where DMS cannot validate the
-# engine, so that check cannot be what trips the run.
-# ---------------------------------------------------------------------------
 
 run "serverless_refuses_a_sap_ase_endpoint" {
   command = plan
@@ -380,11 +346,6 @@ run "serverless_accepts_a_db2_source_without_ssl" {
     error_message = "a Db2 source without SSL is within what DMS Serverless supports and must plan."
   }
 }
-
-# ---------------------------------------------------------------------------
-# Certificates: the id follows the content, so a CA rotation is a new
-# certificate created before the old one is deleted.
-# ---------------------------------------------------------------------------
 
 run "the_certificate_id_carries_a_digest_of_its_content" {
   command = plan

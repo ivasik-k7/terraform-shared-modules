@@ -19,7 +19,6 @@ resource "aws_kms_key" "this" {
   tags = local.key_tags[each.key]
 
   lifecycle {
-    # aws_kms_key_policy owns the live policy; this one only bootstraps.
     ignore_changes = [policy]
 
     precondition {
@@ -46,8 +45,6 @@ resource "aws_kms_key" "this" {
       error_message = "key ${each.key}: a key in a custom key store must be SYMMETRIC_DEFAULT and cannot replicate."
     }
 
-    # Named, not detected: the detected role is the plan's, and HCP Terraform
-    # may apply as another role, which these settings would lock out.
     precondition {
       condition     = var.iam_delegation ? true : length(var.deployers) > 0
       error_message = "iam_delegation = false needs deployers named: without the account delegation only principals named in the key policy can change it, and KMS refuses a policy that locks out the principal applying it. A detected deployer is the plan's role; HCP Terraform can apply as another one."
@@ -85,16 +82,16 @@ resource "aws_kms_key" "this" {
   }
 }
 
-# Imported key material (origin = EXTERNAL). Created pending import: the
-# custodians import the material out of band, so it never reaches state.
+# Keys with imported key material are created in the PendingImport state.
+# https://docs.aws.amazon.com/kms/latest/developerguide/key-state.html
 resource "aws_kms_external_key" "this" {
   for_each = local.create ? { for k, v in local.keys : k => v if v.external } : {}
 
   description             = each.value.description
   multi_region            = each.value.multi_region
   deletion_window_in_days = each.value.deletion_window_days
-  # Computed: a key pending import cannot be enabled. Only an explicit
-  # enabled = false is sent.
+  # EnableKey fails on a key pending import; the provider accepts only enabled = false for one.
+  # https://docs.aws.amazon.com/kms/latest/developerguide/key-state.html
   enabled = each.value.enabled ? null : false
 
   policy                             = local.bootstrap_policy[each.key].primary
@@ -103,8 +100,6 @@ resource "aws_kms_external_key" "this" {
   tags = local.key_tags[each.key]
 
   lifecycle {
-    # The policy belongs to aws_kms_key_policy; valid_to is set by the
-    # out-of-band import, and sending it back would re-import nothing.
     ignore_changes = [policy, valid_to]
 
     precondition {
@@ -142,8 +137,8 @@ resource "aws_kms_external_key" "this" {
 resource "aws_kms_key_policy" "this" {
   for_each = local.create ? local.keys : {}
 
-  # The key ID, not the ARN: the provider reads the ID back, and an ARN here
-  # shows as a change on every plan.
+  # The provider reads key_id back as the key ID, so an ARN here is a diff on every plan.
+  # https://github.com/hashicorp/terraform-provider-aws/blob/v5.100.0/internal/service/kms/key_policy.go
   key_id                             = local.key_id[each.key]
   policy                             = local.final_policy[each.key].primary
   bypass_policy_lockout_safety_check = false
@@ -175,8 +170,6 @@ resource "aws_kms_alias" "this" {
   for_each = local.create ? local.aliases : {}
 
   lifecycle {
-    # A generation's alias <name>-<key>-<generation> could repeat another
-    # key's; the map would silently keep one of them.
     precondition {
       condition     = length(flatten([for k, v in local.keys : v.aliases])) == length(local.aliases)
       error_message = "these aliases are used by more than one key, generations included: ${join(", ", [for a in distinct(flatten([for k, v in local.keys : v.aliases])) : a if length([for k, v in local.keys : 1 if contains(v.aliases, a)]) > 1])}."
@@ -184,17 +177,12 @@ resource "aws_kms_alias" "this" {
   }
 
   name = each.value.name
-  # Through the policy resource, so on destroy the alias goes before the
-  # policy is reset to the provider default, while the deployer still holds
-  # DeleteAlias in the key policy.
+  # On destroy aws_kms_key_policy restores the default policy; this reference removes the alias first.
+  # https://github.com/hashicorp/terraform-provider-aws/blob/v5.100.0/internal/service/kms/key_policy.go
   target_key_id = aws_kms_key_policy.this[each.value.key].key_id
 }
 
-# Refused consumer requirements stop the plan here, before any key exists.
-# Not on the key itself: consumers take the key ARNs, so the key cannot
-# depend on their requirements. Nothing depends on this resource either; a
-# requirement unknown until apply (an ARN of a role created in the same run)
-# is checked at apply, in parallel with the keys.
+# Consumers take the key ARNs, so a check of their requirements cannot sit on the key itself.
 resource "terraform_data" "contract_refusals" {
   count = local.create ? 1 : 0
 

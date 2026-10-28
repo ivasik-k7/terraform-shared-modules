@@ -1,0 +1,22 @@
+# Every change needs a review from an owner. Replace the team with the real
+# owning team or user before enabling "Require review from Code Owners".
+*                               @CTO/platform-terraform
+
+# What "tested" and "released" mean: changes here change every module's gate.
+/.github/                       @CTO/platform-terraform
+/scripts/                       @CTO/platform-terraform
+/.githooks/                     @CTO/platform-terraform
+/.pre-commit-config.yaml        @CTO/platform-terraform
+/.tflint.hcl                    @CTO/platform-terraform
+/.trivyignore                   @CTO/platform-terraform
+/Makefile                       @CTO/platform-terraform
+
+# Agent instructions and permissions are a security control.
+/CLAUDE.md                      @CTO/platform-terraform
+/AGENTS.md                      @CTO/platform-terraform
+/.claude/                       @CTO/platform-terraform
+/.kiro/                         @CTO/platform-terraform
+/.vscode/settings.json          @CTO/platform-terraform
+
+# Per-module owners go below, most specific last, e.g.:
+# /modules/aurora/              @CTO/data-platform

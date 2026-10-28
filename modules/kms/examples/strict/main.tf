@@ -1,13 +1,9 @@
-# A locked-down key set: no IAM delegation, keys reachable only by the
-# principals named here, only through the account's KMS VPC endpoints, inside
-# the organization, with the policy and aliases protected.
-
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.73.0, < 6.0.0"
+      version = ">= 5.73.0, < 7.0.0"
     }
   }
 }
@@ -57,7 +53,6 @@ module "kms" {
 
   name = "cardholder"
 
-  # Only the key policy grants access; the deployer is named, never detected.
   iam_delegation  = false
   deployers       = [var.deployer_role_arn]
   detect_deployer = false
@@ -97,7 +92,6 @@ module "kms" {
     events        = ["deletion", "rotation", "schedule_deletion", "disable", "policy_change", "rotation_disabled", "alias_change"]
   }
 
-  # The account has an organization trail.
   acknowledged_checks = ["cloudtrail_events_need_a_trail"]
 
   required_tag_keys = ["DataClassification"]

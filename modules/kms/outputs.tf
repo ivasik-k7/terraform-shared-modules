@@ -165,8 +165,6 @@ output "iam_policy_statements" {
         Resource  = local.key_arn[k]
         Condition = { StringLike = { "kms:ViaService" = local.via_values[k].primary } }
       }
-      # Attribute-based: any key of this set carrying this key's tags, so a
-      # new generation needs no IAM change.
       abac = {
         Effect    = "Allow"
         Action    = concat(local.crypto_actions_by_kind[local.key_kind[k]].all, local.describe_actions[k])

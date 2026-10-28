@@ -1,11 +1,3 @@
-# The fixes that the mocked suite could not see on its own, because each one
-# is about how AWS behaves rather than how the graph is shaped: SSL modes per
-# engine, the database name on the secret path, the IAM trust condition, the
-# task dimension CloudWatch publishes under, logging posture from the merged
-# settings, and the configurations DMS refuses at apply.
-#
-# Plan runs first; the apply runs at the end need the task ARN.
-
 mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
@@ -16,8 +8,6 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
   }
-  # The account-wide service roles exist; tests that need them missing
-  # override this.
   mock_data "aws_iam_roles" {
     defaults = { names = ["dms-vpc-role", "dms-cloudwatch-logs-role"] }
   }
@@ -47,9 +37,6 @@ mock_provider "aws" {
   }
 }
 
-# A fully configured migration, not a minimal one: terraform test treats a
-# failing check as an error, so a minimal baseline would fail on the module's
-# own advisory checks.
 variables {
   name = "test-migration"
 
@@ -86,7 +73,6 @@ variables {
       ssl_mode           = "verify-full"
       certificate_key    = "rds-ca"
       postgres = {
-        # Triggers off and foreign keys deferred for the duration of the load.
         after_connect_script = "SET session_replication_role = replica;"
       }
     }
@@ -101,21 +87,10 @@ variables {
     }
   }
 
-  # 15% of the 50 GB default, so the storage alarm leaves room to react.
   alarm_free_storage_bytes = 8589934592
 
   sns_topic_arn = "arn:aws:sns:eu-west-1:111122223333:migrations"
 }
-
-
-# ---------------------------------------------------------------------------
-# SSL modes DMS supports per engine
-# ---------------------------------------------------------------------------
-
-# One failing-case run per variable whose validations had none. Each value
-# trips exactly one validation of the named variable while every other input
-# stays at the baseline, so expect_failures on the variable means that
-# validation and nothing else.
 
 run "alarm_cdc_latency_seconds_rejects_below_the_30_second_floor" {
   command = plan
@@ -372,8 +347,6 @@ run "task_event_categories_rejects_not_a_dms_task_category" {
 run "endpoints_secret_arn_rejects_a_partial_arn" {
   command = plan
 
-  # Secrets Manager appends six random characters; the role policy names the
-  # full ARN, so a partial one is AccessDenied at the connection test.
   variables {
     endpoints = {
       source-db = {
@@ -391,4 +364,118 @@ run "endpoints_secret_arn_rejects_a_partial_arn" {
   }
 
   expect_failures = [var.endpoints]
+}
+
+run "an_endpoint_without_any_credential_is_rejected" {
+  command = plan
+
+  variables {
+    endpoints = {
+      source-db = {
+        role          = "source"
+        engine        = "postgres"
+        server_name   = "src.example.com"
+        port          = 5432
+        database_name = "app"
+      }
+    }
+    tasks = {}
+  }
+
+  expect_failures = [var.endpoints]
+}
+
+run "a_brought_secret_role_without_create_secret_role_false_is_rejected" {
+  command = plan
+
+  variables {
+    endpoints = {
+      source-db = {
+        role                   = "source"
+        engine                 = "postgres"
+        server_name            = "src.example.com"
+        port                   = 5432
+        database_name          = "app"
+        secret_arn             = "arn:aws:secretsmanager:eu-west-1:111122223333:secret:src-AbCdEf"
+        secret_access_role_arn = "arn:aws:iam::111122223333:role/dms-secrets"
+      }
+    }
+    tasks = {}
+  }
+
+  expect_failures = [var.endpoints]
+}
+
+run "create_secret_role_false_without_a_role_is_rejected" {
+  command = plan
+
+  variables {
+    endpoints = {
+      source-db = {
+        role               = "source"
+        engine             = "postgres"
+        server_name        = "src.example.com"
+        port               = 5432
+        database_name      = "app"
+        secret_arn         = "arn:aws:secretsmanager:eu-west-1:111122223333:secret:src-AbCdEf"
+        create_secret_role = false
+      }
+    }
+    tasks = {}
+  }
+
+  expect_failures = [var.endpoints]
+}
+
+run "postgres_max_file_size_rejects_zero" {
+  command = plan
+
+  variables {
+    endpoints = {
+      target-db = {
+        role          = "target"
+        engine        = "aurora-postgresql"
+        server_name   = "tgt.example.com"
+        port          = 5432
+        database_name = "app"
+        secret_arn    = "arn:aws:secretsmanager:eu-west-1:111122223333:secret:tgt-AbCdEf"
+        postgres      = { max_file_size = 0 }
+      }
+    }
+    tasks = {}
+  }
+
+  expect_failures = [var.endpoints]
+}
+
+run "an_s3_target_role_without_create_role_false_is_rejected" {
+  command = plan
+
+  variables {
+    s3_targets = {
+      lake = {
+        bucket_name             = "lake-111122223333-eu-west-1"
+        kms_key_arn             = "arn:aws:kms:eu-west-1:111122223333:key/11111111-2222-3333-4444-555555555555"
+        service_access_role_arn = "arn:aws:iam::111122223333:role/dms-lake"
+      }
+    }
+  }
+
+  expect_failures = [var.s3_targets]
+}
+
+run "an_s3_target_with_create_role_false_and_no_role_is_rejected" {
+  command = plan
+
+  variables {
+    s3_targets = {
+      lake = {
+        bucket_name = "lake-111122223333-eu-west-1"
+        kms_key_arn = "arn:aws:kms:eu-west-1:111122223333:key/11111111-2222-3333-4444-555555555555"
+        create_role = false
+      }
+    }
+  }
+
+  expect_failures = [var.s3_targets]
 }

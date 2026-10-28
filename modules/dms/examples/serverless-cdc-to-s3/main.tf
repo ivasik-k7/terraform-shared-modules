@@ -1,22 +1,9 @@
-# Continuous CDC from an RDS PostgreSQL source into a data lake, on serverless
-# compute.
-#
-# Serverless because this replication runs indefinitely at a variable rate:
-# there is no cutover, no end date, and nobody to remember to delete a
-# provisioned instance. DMS scales between the DCU bounds and the bill follows
-# the change rate instead of the clock.
-#
-# Read the cost note before copying this: serverless scales DOWN but never to
-# zero, so min_dcu bills around the clock while the source is quiet. On a source
-# with long idle periods a small provisioned instance is cheaper - COSTS.md has
-# the crossover.
-
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.70.0, < 6.0.0"
+      version = ">= 5.70.0, < 7.0.0"
     }
   }
 }
@@ -78,8 +65,6 @@ module "cdc_to_lake" {
   compute_mode = "serverless"
 
   serverless = {
-    # 1 DCU is 2 GB of memory. The floor is what you pay while the source is
-    # idle; the ceiling is what a burst of changes can reach for.
     min_dcu  = 2
     max_dcu  = 16
     multi_az = true
@@ -110,17 +95,9 @@ module "cdc_to_lake" {
       certificate_key = "rds-ca"
 
       postgres = {
-        # The heartbeat writes to a tiny table on a schedule, which keeps the
-        # replication slot advancing while the source is quiet. Without it an
-        # idle source accumulates WAL until its disk fills - an outage on the
-        # database you were only reading from.
         heartbeat_enable    = true
         heartbeat_frequency = 5
         heartbeat_schema    = "awsdms"
-
-        # No slot_name: DMS then creates and manages the slot itself. A named
-        # slot must already exist and needs a CDC start position, which
-        # serverless mode cannot take - the replication would fail to start.
       }
     }
   }
@@ -130,22 +107,15 @@ module "cdc_to_lake" {
       bucket_name   = var.lake_bucket
       bucket_folder = "raw/sales"
 
-      # Parquet keeps the source's types. CSV would hand every downstream
-      # consumer the job of guessing them back.
       data_format      = "parquet"
       compression_type = "GZIP"
 
       encryption_mode = "SSE_KMS"
       kms_key_arn     = var.lake_kms_key_arn
 
-      # Without partitioning a long-running CDC stream becomes one flat prefix
-      # that every query has to scan.
       date_partition_enabled  = true
       date_partition_sequence = "YYYYMMDD"
 
-      # Which operation produced the row, and when. A consumer cannot tell a
-      # delete from an absence without the first, or order changes without the
-      # second.
       include_op_for_full_load = true
       timestamp_column_name    = "dms_ingest_ts"
     }
@@ -161,17 +131,8 @@ module "cdc_to_lake" {
 
       settings = {
         target_table_prep_mode = "DO_NOTHING"
-        # Validation compares a PostgreSQL source with an S3 target only because
-        # the target is parquet, with a timestamp column and a day-level date
-        # partition - the module reports validation as unable to run otherwise.
-        # Serverless has no validation alarms or validation_tasks.
-        validation_enabled = true
+        validation_enabled     = true
 
-        # LIMITED with a generous ceiling (16384 KB): DMS does not support full
-        # LOB mode for an S3 target, and the module refuses lob_mode FULL or
-        # INLINE into one. Size lob_max_size_kb above the largest LOB in the
-        # source (check with a MAX(length()) query) - past it, values are
-        # truncated without an error, which in a lake surfaces months later.
         lob_mode        = "LIMITED"
         lob_max_size_kb = 16384
       }
