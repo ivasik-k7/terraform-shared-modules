@@ -78,6 +78,8 @@ module "ecs" {
     }
   }
 
+  external_capacity_providers = ["orders-managed-instances"]
+
   log_retention_days = 90
   log_kms_key_arn    = local.key
   log_skip_destroy   = true
@@ -96,6 +98,12 @@ module "ecs" {
   create_event_rules    = true
   alarm_cpu_percent     = 80
   alarm_memory_percent  = 85
+  # The topic, and the on-call integration directly.
+  alarm_actions            = ["arn:aws:sns:eu-west-2:111122223333:orders-alerts", "arn:aws:lambda:eu-west-2:111122223333:function:opsgenie-forwarder"]
+  ok_actions               = ["arn:aws:sns:eu-west-2:111122223333:orders-alerts"]
+  alarm_period             = 60
+  alarm_evaluation_periods = 3
+  trusted_s3_account_ids   = ["111122223333"]
 
   services = {
     # The web tier: two to twenty tasks, scaled on ALB requests and CPU.
@@ -158,6 +166,8 @@ module "ecs" {
       capacity = "balanced"
       # Shell access for on-call; acknowledged below and listed in governance.
       enable_execute_command = true
+      # The worker's pipeline registers and deploys its own revisions.
+      deployment = { ignore_task_definition_changes = true }
       autoscaling = {
         min        = 2
         max        = 10
@@ -183,6 +193,8 @@ module "ecs" {
       cpu      = 512
       memory   = 1024
       capacity = "spot_preferred"
+      # Reconciliation output is audit evidence: seven years.
+      log_group = { retention_days = 2557 }
       schedule = {
         expression            = "cron(0 2 * * ? *)"
         timezone              = "Europe/London"
@@ -212,7 +224,10 @@ module "ecs" {
       managed_ebs_volume = { volume_name = "index", size_in_gb = 100, snapshot_id = "snap-0123456789abcdef0", throughput = 250 }
       desired_count      = 2
       service_connect    = { expose = { search = {} } }
-      deployment         = { minimum_healthy_percent = 50, maximum_percent = 100 }
+      # Also resolvable by clients outside ECS, as search.<namespace>.
+      service_discovery = { namespace_id = "ns-abcdef0123456789" }
+      alarms            = { min_running_tasks = 2 }
+      deployment        = { minimum_healthy_percent = 50, maximum_percent = 100 }
     }
 
     # One log shipper per EC2 container instance.
@@ -228,7 +243,9 @@ module "ecs" {
           mount_points = [{ source_volume = "docker-logs", container_path = "/var/lib/docker/containers", read_only = true }]
         }
       }
-      volumes    = { docker-logs = { host_path = "/var/lib/docker/containers" } }
+      volumes = { docker-logs = { host_path = "/var/lib/docker/containers" } }
+      # The platform's shared group, forwarded to the SIEM by its owner.
+      log_group  = { create = false, name = "/platform/node-logs" }
       deployment = { minimum_healthy_percent = 0 }
     }
   }

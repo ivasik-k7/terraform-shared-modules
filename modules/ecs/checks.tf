@@ -9,9 +9,9 @@ locals {
 check "somebody_hears_a_failure" {
   assert {
     condition = !local.create ? true : (contains(local.acknowledged, "somebody_hears_a_failure") ? true : (
-      length(local.services) == 0 ? true : (var.sns_topic_arn == "" ? false : (var.create_event_rules ? true : var.create_alarms))
+      length(local.services) == 0 ? true : (var.sns_topic_arn != "" ? (var.create_event_rules ? true : var.create_alarms) : (var.create_event_rules ? false : (var.create_alarms ? length(local.alarm_actions) > 0 : false)))
     ))
-    error_message = "Nothing reaches a person: sns_topic_arn is empty, or both create_event_rules and create_alarms are off. A deployment the circuit breaker rolls back, a service whose tasks cannot start and a scheduled job that fails all leave the apply green and tell nobody. ${local.ack_hint}"
+    error_message = "Something is not heard: with no sns_topic_arn the event rules (failed deployments, impaired services, failed jobs) cannot exist, and without alarm_actions neither do alarm notifications; or both create_event_rules and create_alarms are off. A deployment the circuit breaker rolls back, a service whose tasks cannot start and a scheduled job that fails all leave the apply green and tell nobody. ${local.ack_hint}"
   }
 }
 
@@ -31,15 +31,15 @@ check "images_are_pinned" {
 
 check "log_retention_is_bounded" {
   assert {
-    condition     = !local.create ? true : (contains(local.acknowledged, "log_retention_is_bounded") ? true : (length(local.services) == 0 ? true : var.log_retention_days != 0))
-    error_message = "log_retention_days = 0 keeps every log line forever; storage is billed every month for everything ever written. ${local.ack_hint}"
+    condition     = !local.create ? true : (contains(local.acknowledged, "log_retention_is_bounded") ? true : length(local.unbounded_log_groups) == 0)
+    error_message = "Log groups kept forever (retention 0): ${join(", ", local.unbounded_log_groups)}. Storage is billed every month for everything ever written. ${local.ack_hint}"
   }
 }
 
 check "logs_use_a_customer_key" {
   assert {
-    condition     = !local.create ? true : (contains(local.acknowledged, "logs_use_a_customer_key") ? true : (length(local.services) == 0 ? true : var.log_kms_key_arn != ""))
-    error_message = "The service log groups use CloudWatch Logs' own encryption, not a key you control: access cannot be revoked by key policy. ${local.ack_hint}"
+    condition     = !local.create ? true : (contains(local.acknowledged, "logs_use_a_customer_key") ? true : length(local.created_log_groups_without_key) == 0)
+    error_message = "Log groups the module creates without a customer key: ${join(", ", local.created_log_groups_without_key)}. They use CloudWatch Logs' own encryption, so access cannot be revoked by key policy. ${local.ack_hint}"
   }
 }
 

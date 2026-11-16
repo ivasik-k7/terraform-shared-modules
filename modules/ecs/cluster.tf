@@ -56,8 +56,8 @@ resource "aws_ecs_cluster" "this" {
     }
 
     precondition {
-      condition     = local.default_is_preset ? true : contains(keys(var.ec2_capacity_providers), var.default_capacity)
-      error_message = "default_capacity is \"${var.default_capacity}\", which is neither a preset (on_demand, balanced, spot_preferred, spot_only) nor an ec2_capacity_providers key."
+      condition     = local.default_is_preset ? true : contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), var.default_capacity)
+      error_message = "default_capacity is \"${var.default_capacity}\", which is neither a preset (on_demand, balanced, spot_preferred, spot_only) nor an ec2_capacity_providers key or external_capacity_providers name."
     }
 
     precondition {
@@ -108,7 +108,7 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
   count = local.create ? 1 : 0
 
   cluster_name       = aws_ecs_cluster.this[0].name
-  capacity_providers = concat(["FARGATE", "FARGATE_SPOT"], [for k, p in aws_ecs_capacity_provider.ec2 : p.name])
+  capacity_providers = concat(["FARGATE", "FARGATE_SPOT"], [for k, p in aws_ecs_capacity_provider.ec2 : p.name], var.external_capacity_providers)
 
   dynamic "default_capacity_provider_strategy" {
     for_each = local.cluster_default_strategy

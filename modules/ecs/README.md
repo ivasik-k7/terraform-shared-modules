@@ -6,13 +6,13 @@ pipeline-run tasks; Fargate, Fargate Spot and EC2 capacity; Service Connect,
 load balancers, EFS and managed EBS volumes; autoscaling; per-workload IAM;
 alarms, and EventBridge rules for the failures that leave an apply green.
 
-**Stage:** 1.0.0 release candidate. Stable once a security review reports no
+**Stage:** 3.0.0 release candidate. Stable once a security review reports no
 open Critical or High finding ([GOVERNANCE](../../docs/GOVERNANCE.md)).
 
 ```hcl
 module "ecs" {
   source  = "app.terraform.io/<org>/ecs/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   name               = "orders-prod"
   subnet_ids         = var.private_subnet_ids # two AZs or more, with the endpoints in output.network_contract
@@ -87,6 +87,8 @@ start.
 | A Fargate ephemeral storage key that is an alias or multi-Region key | Fargate supports neither ([storage key](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-create-storage-key.html)) |
 | A `required_tag_keys` key missing from `tags` | Tasks would be invisible to cost allocation and tag-based SCPs |
 | A scheduled workload with more than six strategy entries | EventBridge Scheduler accepts no more |
+| Cloud Map A records on bridge or host networking; SRV without a port | Those tasks share the instance's IP, so only an SRV record carries where they listen |
+| Two workloads creating the same `log_group.name`; retention on a group the module does not create | Two resources would fight over one group, or a setting would be silently ignored |
 
 ### Advisory checks
 
@@ -234,15 +236,17 @@ row says otherwise.
 | `deployment.alarm_names` | `[]` | CloudWatch alarms that fail and roll back a deployment |
 | `deployment.wait_for_steady_state` | `false` | The apply waits for the deployment |
 | `deployment.availability_zone_rebalancing` | `true` | Sent only where ECS supports it |
+| `deployment.ignore_task_definition_changes` | `false` | An external pipeline owns the running revision: Terraform still registers revisions, but never moves the service to one (see "Who deploys the image") |
 | `autoscaling` | none | `min` 1, `max` required, `cpu_target` 70, `memory_target` 0, `requests_per_target` 0 with `alb_resource_label`, `custom` metrics, cooldowns 300/60, `disable_scale_in`, `schedules` with a timezone |
 | `schedule` | none | `expression`, `timezone` UTC, `enabled`, `task_count` 1, `flexible_window_minutes` 0, `maximum_retry_attempts` 2, `maximum_event_age_seconds` 3600, `dead_letter_queue_arn`, `dead_letter_queue_kms_key_arn` |
 | `service_connect` | none | `namespace_arn` (else the cluster's), `log_proxy` true, `expose` keyed by port name with `discovery_name`, `dns_name`, `port`, `ingress_port_override`, timeouts |
-| `service_registry_arn` | `""` | A Cloud Map service with A records; SRV records are not supported |
+| `service_discovery` | none | `namespace_id` (the module creates the Cloud Map service, `name` defaulting to the key) or `registry_arn` (an existing one); `dns_record_type` A (awsvpc) or SRV (required for bridge and host, with `container_name`/`container_port`), `ttl` 10, `routing_policy` MULTIVALUE |
+| `log_group` | created | `name` (default `/ecs/<name>/<key>`), `retention_days` (default `log_retention_days`), `kms_key_arn` (default `log_kms_key_arn` for a created group); `create = false` with `name` writes to an existing group the module does not manage, and `kms_key_arn` is then the key its owner set, so the execution role can write under it |
 | `enable_execute_command` | `false` | Warned (`shell_access_is_intended`) |
 | `propagate_tags` | `"SERVICE"` | `NONE` is warned for services |
 | `force_delete` | `false` | Delete the service without scaling it to zero first |
 | `task_role`, `execution_role` | created | `create = false` with `arn` to bring your own; `policies` (inline, by name) and `managed_policies` (by name) on created roles |
-| `alarms` | on | `enabled`, `cpu_percent` and `memory_percent` (`0` is the module default) |
+| `alarms` | on | `enabled`, `cpu_percent` and `memory_percent` (`0` is the module default), `min_running_tasks` (unset: the lowest count the workload may run; `0`: no running-task alarm) |
 | `tags` | `{}` | Added to the workload's resources and tasks; `ManagedBy` and `Module` stay the module's |
 
 ## Behaviour to know about
@@ -262,12 +266,22 @@ ignores `desired_count` after creation, so an apply does not undo the scaler;
 it starts at `autoscaling.min` when `desired_count` is below it. Adding or
 removing `autoscaling` on an existing service moves it between
 `aws_ecs_service.this` and `.autoscaled`: write a `moved` block in the root
-(`docs/UPGRADE-1.0.md` shows it), or the service is destroyed and created.
+(`docs/UPGRADE-3.0.md` shows it), or the service is destroyed and created.
 
-**Images belong to the plan.** The task definition is the deployment, so a new
-image is a new `image` value in a reviewed run (a workspace variable the
-pipeline sets). A pipeline that calls `update-service` behind Terraform's back
-is undone by the next apply. `verify_commands.roll_back` lists revisions; with
+**Who deploys the image.** By default the task definition is the deployment:
+a new image is a new `image` value in a reviewed run (a workspace variable the
+pipeline sets), and a pipeline that calls `update-service` behind Terraform's
+back is undone by the next apply. With
+`deployment.ignore_task_definition_changes = true` the pipeline owns the
+running revision instead: Terraform registers the first revision and keeps
+registering new ones when its own container settings change, but never moves
+the service to them, so a changed secret or environment value in Terraform
+reaches the tasks only when the pipeline next deploys.
+`governance.externally_deployed` lists those services. Switching the flag on an
+existing service moves it between resources: write a root `moved` block from
+`aws_ecs_service.this` to `.static_ignored` (or `.autoscaled` to
+`.autoscaled_ignored`). `verify_commands.deploy_latest` moves a pipeline-owned
+service to its family's latest revision. `verify_commands.roll_back` lists revisions; with
 `task_definition_skip_destroy = true` (the default) old revisions stay ACTIVE,
 so a manual rollback has something to roll back to.
 
@@ -279,6 +293,17 @@ sidecar killed after the essential container finishes also matches). Alarms cove
 memory and, with Container Insights, running tasks below the lowest count the
 workload is allowed (scheduled scale-downs included), with missing data as
 breaching.
+
+**Cloud Map services are replaced, not updated, when `name`, `namespace_id`,
+`dns_record_type` or `routing_policy` changes** (ForceNew at both provider
+majors). `force_destroy` deregisters the running instances so the replacement
+goes through, and DNS for that service is empty until the tasks register again
+in the new one; change those in a window. TTL is an in-place update.
+
+**Alarms and the topic.** `alarm_actions` and `ok_actions` can point anywhere
+(SNS, Lambda, incident plans); the event rules always publish to
+`sns_topic_arn`. `notification_requirements` asks the topic's owner to admit
+CloudWatch only when the alarms actually publish to that topic.
 
 **Storage keys reach tasks at their next deployment.** Changing
 `fargate_ephemeral_storage_kms_key_arn` updates the cluster in place; running
@@ -302,13 +327,12 @@ written to be read there.
 | `services` | `{}` | The workloads; see [Workloads](#workloads) |
 | `subnet_ids`, `security_group_ids` | `[]` | Defaults for every awsvpc workload; a workload can set its own |
 | `sns_topic_arn` | `""` | Where alarms and event rules publish |
-| `log_retention_days` | `30` | `0` keeps logs forever |
-| `log_kms_key_arn` | `""` | Customer key for the log groups |
+| `alarm_actions`, `ok_actions`, `alarm_period`, `alarm_evaluation_periods` | the topic, 60 s × 3 | Alarm targets beyond the topic, and the alarm window |
+| `log_retention_days`, `log_kms_key_arn` | `30`, `""` | `0` keeps logs forever; a customer key for the groups the module creates |
 | `container_insights` | `"enabled"` | Needed for the running-task alarm; billed per metric and per GB |
-| `default_capacity` | `"on_demand"` | Preset, or an EC2 provider key |
-| `ec2_capacity_providers` | `{}` | Auto Scaling groups you own, as capacity |
-| `global_environment`, `global_secrets` | `{}` | For every container |
-| `secrets_kms_key_arns` | `[]` | Keys of the referenced secrets |
+| `default_capacity` | `"on_demand"` | Preset, or an EC2 or external provider |
+| `ec2_capacity_providers`, `external_capacity_providers` | `{}`, `[]` | Auto Scaling groups you own as capacity; Auto Scaling group providers created elsewhere, to register |
+| `global_environment`, `global_secrets`, `secrets_kms_key_arns` | `{}`, `{}`, `[]` | For every container; keys of the referenced secrets |
 | `execute_command` | `DEFAULT` logging | ECS Exec session key and log destination |
 | `fargate_ephemeral_storage_kms_key_arn` | `""` | Reaches tasks at their next deployment |
 | `required_tag_keys` | `[]` | Cost allocation keys that must be in `tags` |
@@ -344,8 +368,12 @@ written to be read there.
   `aws:SourceArn`/`aws:SourceAccount` scoping for task roles; for execution
   roles it is unverified here, and a wrong condition stops every task from
   starting.
-- **No security groups are created.** Ingress from load balancers is the
-  caller's to write.
+- **Log groups a workload only points at** (`log_group.create = false`) are
+  their owner's: retention, policy, and the Logs service grant on their key.
+  The module only asks that key's owner to let the writing execution roles in
+  (`LogWriters<n>`), when `log_group.kms_key_arn` names it.
+- **No security groups are created.** Ingress from load balancers, and the
+  task groups themselves, are the caller's.
 - **Step scaling is not offered.** Target tracking (CPU, memory, ALB requests,
   any CloudWatch metric) and scheduled scaling are; build step policies on
   `service_names` if you need them.
@@ -361,5 +389,4 @@ security fixes for six months after a new major. `moved` blocks are never
 deleted, so a workspace can skip versions.
 Supported: Terraform 1.9 to latest; `hashicorp/aws` 5.100.0 to the newest 6.x.
 [CHANGELOG.md](CHANGELOG.md), [COSTS.md](COSTS.md),
-[docs/UPGRADE-1.0.md](docs/UPGRADE-1.0.md) for callers of the earlier,
-unversioned `modules/ecs`.
+[docs/UPGRADE-3.0.md](docs/UPGRADE-3.0.md) for callers of earlier versions.

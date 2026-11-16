@@ -282,6 +282,67 @@ run "a_cpu_alarm_over_100_is_rejected" {
   expect_failures = [var.alarm_cpu_percent]
 }
 
+run "an_external_provider_named_fargate_is_rejected" {
+  command = plan
+
+  variables {
+    external_capacity_providers = ["FARGATE"]
+  }
+
+  expect_failures = [var.external_capacity_providers]
+}
+
+run "an_external_provider_named_like_the_modules_own_is_rejected" {
+  command = plan
+
+  variables {
+    external_capacity_providers = ["orders-general"]
+    ec2_capacity_providers      = { general = { auto_scaling_group_arn = "arn:aws:autoscaling:eu-west-2:111122223333:autoScalingGroup:x:autoScalingGroupName/g" } }
+  }
+
+  expect_failures = [var.external_capacity_providers]
+}
+
+run "an_alarm_action_that_is_not_an_arn_is_rejected" {
+  command = plan
+
+  variables {
+    alarm_actions = ["ops-team"]
+  }
+
+  expect_failures = [var.alarm_actions]
+}
+
+run "more_than_five_ok_actions_are_rejected" {
+  command = plan
+
+  variables {
+    ok_actions = ["arn:aws:sns:eu-west-2:111122223333:a", "arn:aws:sns:eu-west-2:111122223333:b", "arn:aws:sns:eu-west-2:111122223333:c", "arn:aws:sns:eu-west-2:111122223333:d", "arn:aws:sns:eu-west-2:111122223333:e", "arn:aws:sns:eu-west-2:111122223333:f"]
+  }
+
+  expect_failures = [var.ok_actions]
+}
+
+run "an_alarm_period_that_is_not_whole_minutes_is_rejected" {
+  command = plan
+
+  variables {
+    alarm_period = 90
+  }
+
+  expect_failures = [var.alarm_period]
+}
+
+run "zero_evaluation_periods_are_rejected" {
+  command = plan
+
+  variables {
+    alarm_evaluation_periods = 0
+  }
+
+  expect_failures = [var.alarm_evaluation_periods]
+}
+
 run "a_memory_alarm_of_0_is_rejected" {
   command = plan
 

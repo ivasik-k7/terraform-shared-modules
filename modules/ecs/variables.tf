@@ -214,7 +214,7 @@ variable "default_capacity" {
       balanced        FARGATE base 1, then 1:3 FARGATE:FARGATE_SPOT
       spot_preferred  1:4 FARGATE:FARGATE_SPOT, no base
       spot_only       FARGATE_SPOT only; tasks wait when Spot has no capacity
-    or the key of an ec2_capacity_providers entry.
+    or the key of an ec2_capacity_providers entry, or a name in external_capacity_providers.
   EOT
   type        = string
   default     = "on_demand"
@@ -271,6 +271,23 @@ variable "ec2_capacity_providers" {
       p.managed_scaling.maximum_scaling_step_size <= 10000,
     ])])
     error_message = "ec2_capacity_providers: managed_termination_protection, managed_draining and managed_scaling.status are ENABLED or DISABLED; target_capacity is 1-100; scaling steps are 1-10000 with minimum <= maximum."
+  }
+}
+
+variable "external_capacity_providers" {
+  description = "Auto Scaling group capacity providers created outside this module (by another module or team) to register on the cluster. The cluster's provider list is owned by one resource, so this is the only way to add them. Services reference them by name in capacity or capacity_provider_strategy, with launch = \"EC2\". ECS Managed Instances providers need task definitions compatible with MANAGED_INSTANCES, which aws 5.x cannot declare, so they are not supported."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for p in var.external_capacity_providers : can(regex("^[A-Za-z0-9_-]{1,255}$", p)) ? !contains(["FARGATE", "FARGATE_SPOT", "on_demand", "balanced", "spot_preferred", "spot_only"], p) : false])
+    error_message = "external_capacity_providers must be capacity provider names (letters, digits, - and _), not FARGATE, FARGATE_SPOT or a preset name."
+  }
+
+  validation {
+    condition     = alltrue([for p in var.external_capacity_providers : !contains([for k in keys(var.ec2_capacity_providers) : "${var.name}-${k}"], p)])
+    error_message = "An external_capacity_providers name is the name of one of this module's ec2_capacity_providers (<name>-<key>); the module registers those itself."
   }
 }
 
@@ -461,6 +478,54 @@ variable "alarm_memory_percent" {
   }
 }
 
+variable "alarm_actions" {
+  description = "Where alarms send ALARM: SNS topics, Lambda functions, SSM incident plans, any CloudWatch alarm action ARN. Empty: sns_topic_arn, when set. output.notification_requirements covers only sns_topic_arn; other targets must allow CloudWatch themselves."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition     = length(var.alarm_actions) <= 5 ? alltrue([for a in var.alarm_actions : startswith(a, "arn:")]) : false
+    error_message = "alarm_actions must be at most five ARNs (CloudWatch's limit per state)."
+  }
+}
+
+variable "ok_actions" {
+  description = "Where alarms send OK. Empty: the same as the alarm actions."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition     = length(var.ok_actions) <= 5 ? alltrue([for a in var.ok_actions : startswith(a, "arn:")]) : false
+    error_message = "ok_actions must be at most five ARNs (CloudWatch's limit per state)."
+  }
+}
+
+variable "alarm_period" {
+  description = "Seconds per datapoint for the module's alarms. ECS publishes service metrics every 60 seconds."
+  type        = number
+  default     = 60
+  nullable    = false
+
+  validation {
+    condition     = var.alarm_period >= 60 ? var.alarm_period % 60 == 0 : false
+    error_message = "alarm_period must be a multiple of 60 seconds (ECS publishes its metrics once a minute)."
+  }
+}
+
+variable "alarm_evaluation_periods" {
+  description = "Consecutive breaching periods before an alarm fires; with the 60-second default period, 3 is three minutes."
+  type        = number
+  default     = 3
+  nullable    = false
+
+  validation {
+    condition     = var.alarm_evaluation_periods >= 1 ? var.alarm_evaluation_periods * var.alarm_period <= 86400 : false
+    error_message = "alarm_evaluation_periods must be 1 or more, and periods × alarm_period at most one day."
+  }
+}
+
 variable "create_event_rules" {
   description = "EventBridge rules that forward failed deployments, impaired services and failed scheduled jobs to sns_topic_arn. Events from AWS services cost nothing to match. Not created without a topic."
   type        = bool
@@ -619,13 +684,14 @@ variable "services" {
     health_check_grace_period_seconds = optional(number, 0)
 
     deployment = optional(object({
-      minimum_healthy_percent       = optional(number)
-      maximum_percent               = optional(number, 200)
-      circuit_breaker               = optional(bool, true)
-      rollback                      = optional(bool, true)
-      alarm_names                   = optional(list(string), [])
-      wait_for_steady_state         = optional(bool, false)
-      availability_zone_rebalancing = optional(bool, true)
+      minimum_healthy_percent        = optional(number)
+      maximum_percent                = optional(number, 200)
+      circuit_breaker                = optional(bool, true)
+      rollback                       = optional(bool, true)
+      alarm_names                    = optional(list(string), [])
+      wait_for_steady_state          = optional(bool, false)
+      availability_zone_rebalancing  = optional(bool, true)
+      ignore_task_definition_changes = optional(bool, false)
     }), {})
 
     autoscaling = optional(object({
@@ -678,7 +744,23 @@ variable "services" {
         per_request_timeout_seconds = optional(number, 0)
       })), {})
     }))
-    service_registry_arn = optional(string, "")
+    service_discovery = optional(object({
+      namespace_id    = optional(string, "")
+      registry_arn    = optional(string, "")
+      name            = optional(string, "")
+      dns_record_type = optional(string, "A")
+      ttl             = optional(number, 10)
+      routing_policy  = optional(string, "MULTIVALUE")
+      container_name  = optional(string, "")
+      container_port  = optional(number, 0)
+    }))
+
+    log_group = optional(object({
+      create         = optional(bool, true)
+      name           = optional(string, "")
+      retention_days = optional(number)
+      kms_key_arn    = optional(string, "")
+    }), {})
 
     placement_constraints = optional(list(object({
       type       = string
@@ -706,9 +788,10 @@ variable "services" {
     }), {})
 
     alarms = optional(object({
-      enabled        = optional(bool, true)
-      cpu_percent    = optional(number, 0)
-      memory_percent = optional(number, 0)
+      enabled           = optional(bool, true)
+      cpu_percent       = optional(number, 0)
+      memory_percent    = optional(number, 0)
+      min_running_tasks = optional(number)
     }), {})
 
     tags = optional(map(string), {})
@@ -757,9 +840,9 @@ variable "services" {
 
   validation {
     condition = alltrue([for k, s in var.services : contains(["scheduled", "task"], s.workload) ? alltrue([
-      length(s.load_balancers) == 0, s.service_connect == null, s.service_registry_arn == "",
+      length(s.load_balancers) == 0, s.service_connect == null, s.service_discovery == null, !s.deployment.ignore_task_definition_changes,
     ]) : true])
-    error_message = "load_balancers, service_connect and service_registry_arn need an ECS service; a scheduled or task workload has none."
+    error_message = "load_balancers, service_connect, service_discovery and deployment.ignore_task_definition_changes need an ECS service; a scheduled or task workload has none."
   }
 
   validation {
@@ -958,8 +1041,8 @@ variable "services" {
   validation {
     condition = alltrue([for k, s in var.services : s.capacity == "" ? true : (s.launch == "FARGATE"
       ? contains(["on_demand", "balanced", "spot_preferred", "spot_only"], s.capacity)
-    : contains(keys(var.ec2_capacity_providers), s.capacity))])
-    error_message = "services[*].capacity is a preset (on_demand, balanced, spot_preferred, spot_only) on FARGATE, or an ec2_capacity_providers key on EC2."
+    : contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), s.capacity))])
+    error_message = "services[*].capacity is a preset (on_demand, balanced, spot_preferred, spot_only) on FARGATE, or an ec2_capacity_providers key or external_capacity_providers name on EC2."
   }
 
   validation {
@@ -967,8 +1050,8 @@ variable "services" {
     # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html
     condition = alltrue([for k, s in var.services : alltrue([for p in s.capacity_provider_strategy : s.launch == "FARGATE"
       ? contains(["FARGATE", "FARGATE_SPOT"], p.capacity_provider)
-    : contains(keys(var.ec2_capacity_providers), p.capacity_provider)])])
-    error_message = "capacity_provider_strategy entries are FARGATE or FARGATE_SPOT on a FARGATE launch, and ec2_capacity_providers keys on an EC2 launch. ECS does not mix the two in one strategy."
+    : contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), p.capacity_provider)])])
+    error_message = "capacity_provider_strategy entries are FARGATE or FARGATE_SPOT on a FARGATE launch, and ec2_capacity_providers keys or external_capacity_providers names on an EC2 launch. ECS does not mix the two in one strategy."
   }
 
   validation {
@@ -1044,9 +1127,44 @@ variable "services" {
   }
 
   validation {
-    condition = alltrue([for k, s in var.services : s.service_registry_arn == "" ? true :
-    can(regex("^arn:aws[a-z-]*:servicediscovery:[a-z0-9-]+:[0-9]{12}:service/srv-", s.service_registry_arn))])
-    error_message = "services[*].service_registry_arn must be empty or a Cloud Map service ARN."
+    condition = alltrue([for k, s in var.services : s.service_discovery == null ? true : alltrue([
+      (s.service_discovery.namespace_id != "") != (s.service_discovery.registry_arn != ""),
+      s.service_discovery.namespace_id == "" ? true : can(regex("^ns-[a-z0-9]{16}$", s.service_discovery.namespace_id)),
+      s.service_discovery.registry_arn == "" ? true : can(regex("^arn:aws[a-z-]*:servicediscovery:[a-z0-9-]+:[0-9]{12}:service/srv-", s.service_discovery.registry_arn)),
+      contains(["A", "SRV"], s.service_discovery.dns_record_type),
+      contains(["MULTIVALUE", "WEIGHTED"], s.service_discovery.routing_policy),
+      s.service_discovery.ttl >= 0,
+      s.service_discovery.name == "" ? true : can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$", s.service_discovery.name)),
+    ])])
+    error_message = "service_discovery: exactly one of namespace_id (ns-..., the module creates the Cloud Map service) or registry_arn (an existing Cloud Map service); dns_record_type A or SRV; routing_policy MULTIVALUE or WEIGHTED; ttl 0 or more."
+  }
+
+  validation {
+    # Bridge and host tasks share the instance's IP, so only SRV records carry their port.
+    # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-discovery.html
+    condition = alltrue([for k, s in var.services : s.service_discovery == null ? true : alltrue([
+      s.network_mode == "awsvpc" ? true : s.service_discovery.dns_record_type == "SRV",
+      s.service_discovery.dns_record_type != "SRV" ? true : (s.service_discovery.container_port > 0 ? true : (length(s.containers) == 0 ? s.port > 0 : false)),
+      s.service_discovery.container_name == "" ? true : (length(s.containers) == 0 ? s.service_discovery.container_name == k : contains(keys(s.containers), s.service_discovery.container_name)),
+      s.service_discovery.dns_record_type != "SRV" ? true : (length(s.containers) == 0 ? true : s.service_discovery.container_name != ""),
+    ])])
+    error_message = "service_discovery: bridge and host networking need SRV records; SRV needs container_port (or the image shortcut's port) and, with containers, container_name naming one of them."
+  }
+
+  validation {
+    condition = alltrue([for k, s in var.services : alltrue([
+      s.log_group.create ? true : s.log_group.name != "",
+      s.log_group.name == "" ? true : can(regex("^[A-Za-z0-9._/#-]{1,512}$", s.log_group.name)) ? !startswith(s.log_group.name, "aws/") : false,
+      s.log_group.retention_days == null ? true : contains([0, 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], s.log_group.retention_days),
+      s.log_group.create ? true : s.log_group.retention_days == null,
+      s.log_group.kms_key_arn == "" ? true : can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/", s.log_group.kms_key_arn)),
+    ])])
+    error_message = "log_group: create = false needs name (an existing group, whose retention is its owner's); name is 1-512 of letters, digits . _ - / # and not under aws/; retention_days is a CloudWatch Logs retention period or 0; kms_key_arn is empty or a key ARN (the group's key: for a created group it replaces log_kms_key_arn, for an existing one it is the key its owner set)."
+  }
+
+  validation {
+    condition     = length(distinct([for k, s in var.services : s.log_group.name if s.log_group.create && s.log_group.name != ""])) == length([for k, s in var.services : s.log_group.name if s.log_group.create && s.log_group.name != ""])
+    error_message = "Two workloads ask the module to create the same log_group.name. Create it once (on one workload) and point the others at it with create = false."
   }
 
   validation {
@@ -1137,7 +1255,8 @@ variable "services" {
   validation {
     condition = alltrue([for k, s in var.services : alltrue([
       s.alarms.cpu_percent >= 0, s.alarms.cpu_percent <= 100, s.alarms.memory_percent >= 0, s.alarms.memory_percent <= 100,
+      s.alarms.min_running_tasks == null ? true : s.alarms.min_running_tasks >= 0,
     ])])
-    error_message = "services[*].alarms: cpu_percent and memory_percent are 0 (the module default) or 1-100."
+    error_message = "services[*].alarms: cpu_percent and memory_percent are 0 (the module default) or 1-100; min_running_tasks is unset (the lowest count the workload may run) or 0 (no running-task alarm) or more."
   }
 }

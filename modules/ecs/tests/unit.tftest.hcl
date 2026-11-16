@@ -576,6 +576,193 @@ run "no_infrastructure_role_without_a_managed_volume" {
   }
 }
 
+run "a_pipeline_owned_service_is_its_own_resource" {
+  command = plan
+
+  variables {
+    services = {
+      api    = { image = "r/a:1", desired_count = 2, deployment = { ignore_task_definition_changes = true } }
+      scaled = { image = "r/b:1", autoscaling = { min = 2, max = 4 }, deployment = { ignore_task_definition_changes = true } }
+      plain  = { image = "r/c:1", desired_count = 2 }
+    }
+  }
+
+  # The proxy for "the pipeline owns the revision": which resource holds the
+  # service. tests/service_parity.py proves each resource's ignore_changes.
+  assert {
+    condition = alltrue([
+      keys(aws_ecs_service.static_ignored) == ["api"], keys(aws_ecs_service.autoscaled_ignored) == ["scaled"],
+      keys(aws_ecs_service.this) == ["plain"], length(aws_ecs_service.autoscaled) == 0,
+    ])
+    error_message = "ignore_task_definition_changes moves a service to the resource that ignores task_definition."
+  }
+
+  assert {
+    condition     = alltrue([jsonencode(output.governance.externally_deployed) == jsonencode(["api", "scaled"]), aws_appautoscaling_target.this["scaled"].resource_id == "service/orders/scaled"])
+    error_message = "pipeline-owned services are listed in governance, and still autoscale."
+  }
+
+  assert {
+    condition     = toset(keys(output.service_arns)) == toset(["api", "scaled", "plain"])
+    error_message = "every service resource reaches the outputs."
+  }
+}
+
+run "cloud_map_registers_a_records_or_srv_with_a_port" {
+  command = plan
+
+  variables {
+    services = {
+      api = { image = "r/a:1", port = 8080, desired_count = 2, service_discovery = { namespace_id = "ns-abcdef0123456789" } }
+      legacy = {
+        desired_count     = 2
+        containers        = { app = { image = "r/l:1", port_mappings = [{ container_port = 7000 }] } }
+        service_discovery = { namespace_id = "ns-abcdef0123456789", name = "legacy-api", dns_record_type = "SRV", container_name = "app", container_port = 7000 }
+      }
+      existing = { image = "r/e:1", desired_count = 2, service_discovery = { registry_arn = "arn:aws:servicediscovery:eu-west-2:111122223333:service/srv-abcdef0123456789" } }
+    }
+  }
+
+  assert {
+    condition     = aws_service_discovery_service.this["api"].name == "api" && aws_service_discovery_service.this["api"].dns_config[0].dns_records[0].type == "A"
+    error_message = "an A record is registered under the workload's name by default."
+  }
+
+  assert {
+    condition     = aws_service_discovery_service.this["legacy"].name == "legacy-api" && one(aws_ecs_service.this["legacy"].service_registries).container_port == 7000 && one(aws_ecs_service.this["legacy"].service_registries).container_name == "app"
+    error_message = "an SRV registration names the container and port ECS publishes."
+  }
+
+  assert {
+    condition     = alltrue([!contains(keys(aws_service_discovery_service.this), "existing"), one(aws_ecs_service.this["existing"].service_registries).registry_arn == "arn:aws:servicediscovery:eu-west-2:111122223333:service/srv-abcdef0123456789"])
+    error_message = "an existing Cloud Map service is used, not created."
+  }
+}
+
+run "a_workload_can_log_to_a_shared_group_or_keep_its_own_retention" {
+  command = plan
+
+  variables {
+    services = {
+      api   = { image = "r/a:1", desired_count = 2, log_group = { create = false, name = "/shared/siem-forwarded" } }
+      audit = { image = "r/b:1", desired_count = 2, log_group = { retention_days = 2557 } }
+      plain = { image = "r/c:1", desired_count = 2 }
+    }
+  }
+
+  assert {
+    condition     = alltrue([!contains(keys(aws_cloudwatch_log_group.this), "api"), jsondecode(aws_ecs_task_definition.this["api"].container_definitions)[0].logConfiguration.options["awslogs-group"] == "/shared/siem-forwarded"])
+    error_message = "a workload pointed at an existing group writes there, and the module does not create or own it."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_group.this["audit"].retention_in_days == 2557 && aws_cloudwatch_log_group.this["plain"].retention_in_days == 30
+    error_message = "a workload's retention overrides the module's."
+  }
+
+  assert {
+    condition     = one([for r in output.kms_key_policy_requirements : r.conditions[0].values if r.sid == "ServiceLogGroups0"]) == tolist(["arn:aws:logs:eu-west-2:111122223333:log-group:/ecs/orders/audit", "arn:aws:logs:eu-west-2:111122223333:log-group:/ecs/orders/plain"])
+    error_message = "the Logs grant names exactly the groups the module creates."
+  }
+
+  assert {
+    condition     = jsonencode(output.governance.log_groups_not_managed) == jsonencode(["api"])
+    error_message = "a reviewer sees which workloads log to a group the module does not manage."
+  }
+
+  assert {
+    condition     = !strcontains(aws_iam_role_policy.execution_module["audit"].policy, "orders-api") && !contains(keys(aws_iam_role_policy.execution_module), "api")
+    error_message = "a workload writing to an existing group without a key gets no log-key grant; the module key goes only to writers of its groups."
+  }
+}
+
+run "each_log_group_is_encrypted_and_granted_with_its_own_key" {
+  command = plan
+
+  variables {
+    services = {
+      api = { image = "r/a:1", desired_count = 2 }
+      siem = {
+        image         = "r/b:1"
+        desired_count = 2
+        log_group     = { create = false, name = "/platform/siem", kms_key_arn = "arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555" }
+      }
+    }
+  }
+
+  assert {
+    condition     = one([for s in jsondecode(aws_iam_role_policy.execution_module["siem"].policy).Statement : s.Resource if s.Sid == "WriteEncryptedLogs"]) == "arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555"
+    error_message = "a workload writing to an existing encrypted group is granted that group's key, through CloudWatch Logs."
+  }
+
+  assert {
+    condition = jsonencode([for r in output.kms_key_policy_requirements : [r.sid, r.principals.arns] if startswith(r.sid, "LogWriters")]) == jsonencode([
+      ["LogWriters0", ["arn:aws:iam::111122223333:role/orders-api-exec"]],
+      ["LogWriters1", ["arn:aws:iam::111122223333:role/orders-siem-exec"]],
+    ])
+    error_message = "each key's owner is asked to allow exactly the execution roles that write under that key."
+  }
+
+  assert {
+    condition     = !contains([for r in output.kms_key_policy_requirements : r.sid], "ServiceLogGroups1")
+    error_message = "the module asks the Logs service grant only for groups it creates; the existing group's owner already has it."
+  }
+}
+
+run "alarm_actions_windows_and_floors_are_the_callers" {
+  command = plan
+
+  variables {
+    alarm_actions            = ["arn:aws:sns:eu-west-2:111122223333:pager", "arn:aws:lambda:eu-west-2:111122223333:function:opsgenie"]
+    alarm_period             = 120
+    alarm_evaluation_periods = 5
+    services = {
+      api = { image = "r/a:1", desired_count = 4, alarms = { min_running_tasks = 3 } }
+    }
+  }
+
+  assert {
+    condition = alltrue([
+      aws_cloudwatch_metric_alarm.cpu["api"].alarm_actions == toset(["arn:aws:sns:eu-west-2:111122223333:pager", "arn:aws:lambda:eu-west-2:111122223333:function:opsgenie"]),
+      aws_cloudwatch_metric_alarm.cpu["api"].ok_actions == aws_cloudwatch_metric_alarm.cpu["api"].alarm_actions,
+      aws_cloudwatch_metric_alarm.cpu["api"].period == 120,
+      aws_cloudwatch_metric_alarm.running_tasks["api"].evaluation_periods == 5,
+    ])
+    error_message = "alarm targets, OK targets (defaulting to the same), period and evaluation periods come from the caller."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.running_tasks["api"].threshold == 3
+    error_message = "min_running_tasks overrides the derived floor."
+  }
+
+  assert {
+    condition     = length(output.notification_requirements.topic_policy_statements) == 1
+    error_message = "with alarm actions elsewhere, the topic contract no longer claims the alarms publish to sns_topic_arn."
+  }
+}
+
+run "external_capacity_providers_are_registered_and_usable" {
+  command = plan
+
+  variables {
+    external_capacity_providers = ["managed-instances"]
+    services = {
+      api = { image = "r/a:1", desired_count = 2, launch = "EC2", capacity = "managed-instances" }
+    }
+  }
+
+  assert {
+    condition     = contains(aws_ecs_cluster_capacity_providers.this[0].capacity_providers, "managed-instances")
+    error_message = "an external provider is registered on the cluster, which only this module can do."
+  }
+
+  assert {
+    condition     = aws_ecs_service.this["api"].capacity_provider_strategy == toset([{ capacity_provider = "managed-instances", weight = 1, base = 0 }])
+    error_message = "a service can run on an external provider by name."
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Autoscaling
 # ---------------------------------------------------------------------------
@@ -1208,7 +1395,7 @@ run "every_kms_requirement_is_contract_v2" {
 
   assert {
     condition = toset([for r in output.kms_key_policy_requirements : r.sid]) == toset([
-      "ServiceLogGroups", "LogGroupCreator", "LogWriters", "LogReaders", "SecretsKey0", "EcsExecTasks", "EcsExecOperators",
+      "ServiceLogGroups0", "LogGroupCreator0", "LogWriters0", "LogReaders0", "SecretsKey0", "EcsExecTasks", "EcsExecOperators",
       "FargateEphemeralDataKeys", "FargateEphemeralGrants", "FargateEphemeralDescribe",
       "ManagedEbsDescribe0", "ManagedEbsDataKeys0", "ManagedEbsGrants0", "SnsTopicPublishers",
     ])
@@ -1366,6 +1553,8 @@ run "create_false_plans_nothing_and_outputs_nothing" {
     condition = alltrue([
       length(aws_ecs_cluster.this) == 0, length(aws_ecs_cluster_capacity_providers.this) == 0, length(aws_ecs_capacity_provider.ec2) == 0,
       length(aws_ecs_task_definition.this) == 0, length(aws_ecs_service.this) == 0, length(aws_ecs_service.autoscaled) == 0,
+      length(aws_ecs_service.static_ignored) == 0, length(aws_ecs_service.autoscaled_ignored) == 0,
+      length(aws_service_discovery_service.this) == 0,
       length(aws_iam_role.task) == 0, length(aws_iam_role.execution) == 0, length(aws_iam_role.scheduler) == 0, length(aws_iam_role.infrastructure) == 0,
       length(aws_cloudwatch_log_group.this) == 0, length(aws_cloudwatch_metric_alarm.cpu) == 0, length(aws_cloudwatch_event_rule.this) == 0,
       length(aws_appautoscaling_target.this) == 0, length(aws_scheduler_schedule.this) == 0, length(aws_scheduler_schedule_group.this) == 0,

@@ -1,7 +1,31 @@
-# Upgrading to 1.0
+# Upgrading to 3.0
 
-For workspaces that call the earlier, unversioned `modules/ecs` (by path, at
-commit `bbbc35c` or later). A workspace starting fresh does not need this.
+For workspaces on an earlier `modules/ecs`. A workspace starting fresh does
+not need this.
+
+The input and output tables map from `modules/ecs` as it stands at commit
+`bbbc35c` in this repository. The 2.x releases are not in this checkout. Where
+2.x already split the service four ways (`static`, `static_ignored`,
+`autoscaled`, `autoscaled_ignored`), the module's `moved` block takes
+`static` to `this`, and the other three keep their addresses. 2.x's security
+groups are no longer created here: declare each one in the root, move it out
+of the module so it is kept rather than destroyed, and pass its ID in
+`security_group_ids`:
+
+```hcl
+resource "aws_security_group" "api" {
+  name_prefix = "orders-api-"
+  vpc_id      = var.vpc_id
+}
+
+moved {
+  from = module.ecs.aws_security_group.service["api"]
+  to   = aws_security_group.api
+}
+```
+
+Copy the group's `name_prefix` and `description` (changing either replaces the
+group) and its rules from the plan into the new resource.
 
 ## What happens on the first plan
 
@@ -76,7 +100,7 @@ moved {
 | `services[*].volumes` (list) | `volumes` map keyed by name: `efs_volume_configuration` becomes `efs` (`transit_encryption` a bool, `authorization_config.iam` becomes `iam_authorization`, now default `true`; `transit_encryption_port` removed), `docker_volume_configuration` becomes `docker` (`autoprovision` now default `false`) |
 | `services[*].network_configuration` | `subnet_ids`, `security_group_ids`, `assign_public_ip` (module-level defaults available) |
 | `services[*].load_balancers` | Same, `container_name`/`container_port` optional with the image shortcut |
-| `services[*].service_registries` | `service_registry_arn`. `port`, `container_name` and `container_port` are not supported, so Cloud Map services with SRV records cannot be expressed: keep such services outside the module |
+| `services[*].service_registries` | `service_discovery = { registry_arn, dns_record_type = "SRV", container_name, container_port }` for an existing Cloud Map service, or `namespace_id` to let the module create it |
 | `services[*].deployment_configuration` | `deployment = { minimum_healthy_percent, maximum_percent, circuit_breaker, rollback, alarm_names }` |
 | `services[*].wait_for_steady_state` | `deployment.wait_for_steady_state` |
 | `services[*].scheduling_strategy = "DAEMON"` | `workload = "daemon"` |

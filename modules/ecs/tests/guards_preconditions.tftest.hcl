@@ -38,6 +38,16 @@ run "a_missing_required_tag_fails_the_plan" {
   expect_failures = [aws_ecs_cluster.this]
 }
 
+run "an_external_default_capacity_that_is_not_registered_fails_the_plan" {
+  command = plan
+
+  variables {
+    default_capacity = "managed"
+  }
+
+  expect_failures = [aws_ecs_cluster.this]
+}
+
 run "an_empty_required_tag_fails_the_plan" {
   command = plan
 

@@ -94,5 +94,6 @@ resource "aws_scheduler_schedule" "this" {
     aws_ecs_cluster_capacity_providers.this,
     aws_iam_role_policy_attachment.execution,
     aws_iam_role_policy.execution_module,
+    aws_cloudwatch_log_group.this,
   ]
 }

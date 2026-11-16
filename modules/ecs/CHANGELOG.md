@@ -7,10 +7,10 @@ All notable changes to this module. The format is
 
 Entries marked **BREAKING** change what an unchanged caller's plan does.
 
-## [1.0.0] - unreleased
+## [3.0.0] - unreleased
 
-A rewrite. Callers of the earlier, unversioned `modules/ecs` follow
-[docs/UPGRADE-1.0.md](docs/UPGRADE-1.0.md).
+A rewrite. Callers of earlier versions follow
+[docs/UPGRADE-3.0.md](docs/UPGRADE-3.0.md).
 
 ### Added
 
@@ -41,6 +41,17 @@ A rewrite. Callers of the earlier, unversioned `modules/ecs` follow
 - S3 grants scoped by `aws:ResourceAccount` (`trusted_s3_account_ids`); keys
   for environment files, ECS Exec transcripts and schedule dead-letter queues.
 - Fifteen advisory checks and `acknowledged_checks`.
+- `deployment.ignore_task_definition_changes`: an external pipeline owns the
+  running revision (`aws_ecs_service.static_ignored` and
+  `.autoscaled_ignored`, held identical to the other two by
+  `tests/service_parity.py`).
+- Per-workload `service_discovery` (creating the Cloud Map service, or using
+  one; A or SRV) and `log_group` (own name, retention and key, or an existing
+  group); log-key grants and contract entries per key.
+- `external_capacity_providers`; `alarm_actions`, `ok_actions`,
+  `alarm_period`, `alarm_evaluation_periods`, `alarms.min_running_tasks`.
+- `verify_commands.deploy_latest` for pipeline-owned services.
+- A `moved` block from `aws_ecs_service.static` to `.this`.
 
 ### Changed
 

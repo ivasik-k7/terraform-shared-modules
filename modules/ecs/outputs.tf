@@ -19,12 +19,12 @@ output "capacity_provider_names" {
 
 output "service_arns" {
   description = "ECS service ARN by workload key, for service and daemon workloads."
-  value       = merge({ for k, s in aws_ecs_service.this : k => s.id }, { for k, s in aws_ecs_service.autoscaled : k => s.id })
+  value       = { for k, s in merge(aws_ecs_service.this, aws_ecs_service.autoscaled, aws_ecs_service.static_ignored, aws_ecs_service.autoscaled_ignored) : k => s.id }
 }
 
 output "service_names" {
   description = "ECS service name by workload key (the key itself), for service and daemon workloads."
-  value       = merge({ for k, s in aws_ecs_service.this : k => s.name }, { for k, s in aws_ecs_service.autoscaled : k => s.name })
+  value       = { for k, s in merge(aws_ecs_service.this, aws_ecs_service.autoscaled, aws_ecs_service.static_ignored, aws_ecs_service.autoscaled_ignored) : k => s.name }
 }
 
 output "task_definition_arns" {
@@ -53,12 +53,12 @@ output "execution_role_arns" {
 }
 
 output "log_group_names" {
-  description = "Log group name by workload key: /ecs/<name>/<key>."
-  value       = { for k, g in aws_cloudwatch_log_group.this : k => g.name }
+  description = "Log group each workload writes to, by key: /ecs/<name>/<key>, or its log_group.name (created or existing)."
+  value       = local.create ? local.log_group_name : {}
 }
 
 output "log_group_arns" {
-  description = "Log group ARN by workload key, without the :* suffix."
+  description = "ARN of each log group the module created, by workload key, without the :* suffix."
   value       = { for k, g in aws_cloudwatch_log_group.this : k => g.arn }
 }
 
@@ -97,6 +97,10 @@ output "governance" {
     autoscaled                 = sort(keys(local.autoscaled))
     scheduled                  = { for k, s in local.scheduled : k => "${s.schedule.expression} ${s.schedule.timezone}" }
     unpinned_images            = local.unpinned_images
+    externally_deployed        = local.externally_deployed
+    service_discovery          = { for k, s in local.long_running : k => "${s.service_discovery.namespace_id != "" ? "created" : "existing"} ${s.service_discovery.dns_record_type}" if s.service_discovery != null }
+    log_groups_not_managed     = sort([for k, s in local.services : k if !s.log_group.create])
+    log_retention_by_workload  = local.log_retention
     mutable_tag_images         = local.mutable_tag_images
     external_registries        = local.external_registries
     host_access                = local.host_access
@@ -110,7 +114,7 @@ output "governance" {
     schedules_without_dlq      = local.schedules_without_dlq
     container_insights         = var.container_insights
     log_retention_days         = var.log_retention_days
-    log_customer_key           = var.log_kms_key_arn != ""
+    log_keys_by_workload       = { for k, key in local.log_key : k => key != "" ? key : "CloudWatch Logs' own encryption" }
     ephemeral_customer_key     = var.fargate_ephemeral_storage_kms_key_arn != ""
     notifications              = var.sns_topic_arn != ""
     alarms                     = sort(keys(local.alarmed))
@@ -168,44 +172,48 @@ output "network_contract" {
 output "kms_key_policy_requirements" {
   description = "What each customer managed key's policy has to allow, in contract version 2: key, sid, principals = { services, arns, roles }, actions, conditions = [{ test, variable, values }], purpose. Known at plan, so the key owner can act before the apply. The symbolic role deployer is whoever runs Terraform; exec_operators is whoever runs aws ecs execute-command."
   value = !local.create ? null : concat(
-    var.log_kms_key_arn == "" ? [] : [
-      {
-        key        = var.log_kms_key_arn
-        sid        = "ServiceLogGroups"
-        principals = { services = ["logs.${local.region}.amazonaws.com"], arns = [], roles = [] }
-        actions    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
-        conditions = [{ test = "ArnLike", variable = "kms:EncryptionContext:aws:logs:arn", values = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:${local.log_group_prefix}/*"] }]
-        purpose    = "CloudWatch Logs encrypts the service log groups. Without it, creating a log group fails part way through the apply."
-      },
-      {
-        key        = var.log_kms_key_arn
-        sid        = "LogGroupCreator"
-        principals = { services = [], arns = [], roles = ["deployer"] }
-        actions    = ["kms:Describe*"]
-        conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["logs.${local.region}.amazonaws.com"] }]
-        purpose    = "CloudWatch Logs requires the principal calling CreateLogGroup with a key to be able to describe it; otherwise the create fails with AccessDeniedException."
-      },
-      {
-        key = var.log_kms_key_arn
-        sid = "LogWriters"
-        principals = {
-          services = []
-          arns     = sort(distinct(values(local.execution_role_arn)))
-          roles    = length(local.ec2_workloads) > 0 ? ["container_instances"] : []
-        }
-        actions    = local.log_writer_actions
-        conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["logs.${local.region}.amazonaws.com"] }]
-        purpose    = "The awslogs driver writes with the execution role on Fargate, and with the container instance role on EC2; writers to a log group under a customer key need it through CloudWatch Logs."
-      },
-      {
-        key        = var.log_kms_key_arn
-        sid        = "LogReaders"
-        principals = { services = [], arns = [], roles = ["log_readers"] }
-        actions    = ["kms:Decrypt", "kms:Describe*"]
-        conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["logs.${local.region}.amazonaws.com"] }]
-        purpose    = "Whoever reads the logs (aws logs tail, Logs Insights) decrypts them through CloudWatch Logs."
-      },
-    ],
+    flatten([for i, key in local.log_keys : concat(
+      length([for k, s in local.created_log_groups : k if local.log_key[k] == key]) == 0 ? [] : [
+        {
+          key        = key
+          sid        = "ServiceLogGroups${i}"
+          principals = { services = ["logs.${local.region}.amazonaws.com"], arns = [], roles = [] }
+          actions    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
+          conditions = [{ test = "ArnEquals", variable = "kms:EncryptionContext:aws:logs:arn", values = sort(distinct([for k, s in local.created_log_groups : local.log_group_arn[k] if local.log_key[k] == key])) }]
+          purpose    = "CloudWatch Logs encrypts the log groups the module creates with this key. Without it, creating a log group fails part way through the apply."
+        },
+        {
+          key        = key
+          sid        = "LogGroupCreator${i}"
+          principals = { services = [], arns = [], roles = ["deployer"] }
+          actions    = ["kms:Describe*"]
+          conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["logs.${local.region}.amazonaws.com"] }]
+          purpose    = "CloudWatch Logs requires the principal calling CreateLogGroup with a key to be able to describe it; otherwise the create fails with AccessDeniedException."
+        },
+      ],
+      [
+        {
+          key = key
+          sid = "LogWriters${i}"
+          principals = {
+            services = []
+            arns     = sort(distinct([for k, s in local.services : local.execution_role_arn[k] if local.log_key[k] == key]))
+            roles    = anytrue([for k, s in local.services : s.launch == "EC2" if local.log_key[k] == key]) ? ["container_instances"] : []
+          }
+          actions    = local.log_writer_actions
+          conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["logs.${local.region}.amazonaws.com"] }]
+          purpose    = "The awslogs driver writes with the execution role on Fargate, and with the container instance role on EC2; writers to a log group under a customer key need it through CloudWatch Logs."
+        },
+        {
+          key        = key
+          sid        = "LogReaders${i}"
+          principals = { services = [], arns = [], roles = ["log_readers"] }
+          actions    = ["kms:Decrypt", "kms:Describe*"]
+          conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["logs.${local.region}.amazonaws.com"] }]
+          purpose    = "Whoever reads the logs (aws logs tail, Logs Insights) decrypts them through CloudWatch Logs."
+        },
+      ],
+    )]),
     [for i, key in var.secrets_kms_key_arns : {
       key        = key
       sid        = "SecretsKey${i}"
@@ -332,11 +340,11 @@ output "kms_key_policy_requirements" {
         purpose = "EBS attaches the encrypted volume through a grant. Without the managed EBS entries, the task stops with a volume attachment failure."
       },
     ]]),
-    var.sns_topic_kms_key_arn == "" || var.sns_topic_arn == "" || length(local.alarmed) + length(local.event_rules) == 0 ? [] : [{
+    var.sns_topic_kms_key_arn == "" || var.sns_topic_arn == "" ? [] : (!local.alarms_publish_to_topic && length(local.event_rules) == 0) ? [] : [{
       key = var.sns_topic_kms_key_arn
       sid = "SnsTopicPublishers"
       principals = {
-        services = concat(length(local.alarmed) > 0 ? ["cloudwatch.amazonaws.com"] : [], length(local.event_rules) > 0 ? ["events.amazonaws.com"] : [])
+        services = concat(local.alarms_publish_to_topic ? ["cloudwatch.amazonaws.com"] : [], length(local.event_rules) > 0 ? ["events.amazonaws.com"] : [])
         arns     = []
         roles    = []
       }
@@ -352,7 +360,7 @@ output "notification_requirements" {
   value = !local.create || var.sns_topic_arn == "" ? null : {
     topic = var.sns_topic_arn
     topic_policy_statements = concat(
-      length(local.alarmed) == 0 ? [] : [{
+      !local.alarms_publish_to_topic ? [] : [{
         Sid       = "EcsAlarms"
         Effect    = "Allow"
         Principal = { Service = "cloudwatch.amazonaws.com" }
@@ -478,7 +486,8 @@ output "verify_commands" {
     stopped_tasks = { for k, s in local.services : k => "aws ecs describe-tasks --cluster ${var.name} --tasks $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --desired-status STOPPED --query 'taskArns[:20]' --output text) --query 'tasks[].[stoppedAt,stopCode,stoppedReason,containers[0].exitCode]' --output table" }
     logs          = { for k, s in local.services : k => "aws logs tail ${local.log_group_name[k]} --since 1h --follow" }
     shell         = { for k, s in local.exec_services : k => "aws ecs execute-command --cluster ${var.name} --task $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --query 'taskArns[0]' --output text) --container ${contains(keys(local.containers[k]), k) ? k : [for n, c in local.containers[k] : n if c.essential][0]} --interactive --command /bin/sh" }
-    roll_back     = { for k, s in local.long_running : k => "aws ecs list-task-definitions --family-prefix ${var.name}-${k} --sort DESC --max-items 5 --output table && echo 'then: aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k}:<revision> - and set the same image in Terraform, or the next apply rolls it forward again'" }
+    roll_back     = { for k, s in local.long_running : k => "aws ecs list-task-definitions --family-prefix ${var.name}-${k} --sort DESC --max-items 5 --output table && echo 'then: aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k}:<revision>${s.deployment.ignore_task_definition_changes ? " - Terraform leaves it there; the next pipeline deploy moves it on" : " - and set the same image in Terraform, or the next apply rolls it forward again"}'" }
+    deploy_latest = { for k in local.externally_deployed : k => "aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k} --query 'service.deployments[0].[taskDefinition,rolloutState]' --output text" }
     schedules     = { for k, s in local.scheduled : k => "aws scheduler get-schedule --group-name ${var.name} --name ${k} --query '[State,ScheduleExpression,ScheduleExpressionTimezone,Target.RetryPolicy]' --output table" }
     capacity      = "aws ecs describe-clusters --clusters ${var.name} --include STATISTICS --query 'clusters[0].[capacityProviders,defaultCapacityProviderStrategy,runningTasksCount,pendingTasksCount]' --output json"
     exec_ready    = { for k, s in local.exec_services : k => "aws ecs describe-tasks --cluster ${var.name} --tasks $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --query 'taskArns[0]' --output text) --query 'tasks[0].containers[].managedAgents[].[name,lastStatus]' --output table" }

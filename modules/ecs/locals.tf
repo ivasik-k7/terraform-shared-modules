@@ -27,17 +27,30 @@ locals {
   services      = local.create ? var.services : {}
   workload_tags = { for k, s in local.services : k => merge(var.tags, s.tags, local.module_tags) }
   long_running  = { for k, s in local.services : k => s if contains(["service", "daemon"], s.workload) }
-  autoscaled    = { for k, s in local.long_running : k => s if s.autoscaling != null }
-  static        = { for k, s in local.long_running : k => s if s.autoscaling == null }
-  scheduled     = { for k, s in local.services : k => s if s.workload == "scheduled" }
-  replica       = { for k, s in local.long_running : k => s if s.workload == "service" }
+  # Four service resources, because ignore_changes cannot be conditional:
+  # who owns desired_count (autoscaling) and who owns the running revision
+  # (an external pipeline, with ignore_task_definition_changes).
+  scaled             = { for k, s in local.long_running : k => s if s.autoscaling != null }
+  static             = { for k, s in local.long_running : k => s if s.autoscaling == null ? !s.deployment.ignore_task_definition_changes : false }
+  autoscaled         = { for k, s in local.long_running : k => s if s.autoscaling != null ? !s.deployment.ignore_task_definition_changes : false }
+  static_ignored     = { for k, s in local.long_running : k => s if s.autoscaling == null ? s.deployment.ignore_task_definition_changes : false }
+  autoscaled_ignored = { for k, s in local.long_running : k => s if s.autoscaling != null ? s.deployment.ignore_task_definition_changes : false }
+  scheduled          = { for k, s in local.services : k => s if s.workload == "scheduled" }
+  replica            = { for k, s in local.long_running : k => s if s.workload == "service" }
 
   exec_configuration    = var.execute_command.kms_key_arn != "" ? true : var.execute_command.logging != "DEFAULT"
   storage_configuration = var.fargate_ephemeral_storage_kms_key_arn != "" ? true : var.managed_storage_kms_key_arn != ""
   cluster_configuration = local.exec_configuration ? true : local.storage_configuration
 
-  log_group_name = { for k, s in local.services : k => "${local.log_group_prefix}/${k}" }
-  log_group_arn  = { for k, n in local.log_group_name : k => "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:${n}" }
+  log_group_name     = { for k, s in local.services : k => s.log_group.name != "" ? s.log_group.name : "${local.log_group_prefix}/${k}" }
+  log_group_arn      = { for k, n in local.log_group_name : k => "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:${n}" }
+  created_log_groups = { for k, s in local.services : k => s if s.log_group.create }
+  log_retention      = { for k, s in local.created_log_groups : k => s.log_group.retention_days != null ? s.log_group.retention_days : var.log_retention_days }
+  # The key a workload's log group is encrypted with: its own, else the
+  # module's for a group the module creates. An existing group without one is
+  # taken to use CloudWatch Logs' own encryption.
+  log_key  = { for k, s in local.services : k => s.log_group.kms_key_arn != "" ? s.log_group.kms_key_arn : (s.log_group.create ? var.log_kms_key_arn : "") }
+  log_keys = distinct([for k, key in local.log_key : key if key != ""])
 
   # ---------------------------------------------------------------------------
   # Capacity
@@ -371,15 +384,15 @@ locals {
       Resource  = var.environment_files_kms_key_arns
       Condition = { StringEquals = { "kms:ViaService" = "s3.${local.region}.amazonaws.com" } }
     })],
-    var.log_kms_key_arn == "" ? [] : [jsonencode({
+    local.log_key[k] == "" ? [] : [jsonencode({
       Sid       = "WriteEncryptedLogs"
       Effect    = "Allow"
       Action    = local.log_writer_actions
-      Resource  = var.log_kms_key_arn
+      Resource  = local.log_key[k]
       Condition = { StringEquals = { "kms:ViaService" = "logs.${local.region}.amazonaws.com" } }
     })],
   ) }
-  execution_module_policy = { for k, s in local.execution_roles_created : k => s if var.log_kms_key_arn != "" ? true : length(local.secret_refs[k]) + length(flatten([for c in values(local.containers[k]) : c.environment_files])) > 0 }
+  execution_module_policy = { for k, s in local.execution_roles_created : k => s if local.log_key[k] != "" ? true : length(local.secret_refs[k]) + length(flatten([for c in values(local.containers[k]) : c.environment_files])) > 0 }
 
   ebs_services       = { for k, s in local.services : k => s if s.managed_ebs_volume != null }
   infrastructure_arn = var.infrastructure_role.create ? "arn:${local.partition}:iam::${local.account_id}:role/${var.name}-ecs-infrastructure" : var.infrastructure_role.arn
@@ -397,16 +410,23 @@ locals {
     s.autoscaling == null ? s.desired_count : min(max(s.desired_count, s.autoscaling.min), s.autoscaling.max)
   ) }
 
-  scaling_policies = merge([for k, s in local.autoscaled : merge(
+  scaling_policies = merge([for k, s in local.scaled : merge(
     s.autoscaling.cpu_target > 0 ? { "${k}/cpu" = { service = k, metric = "ECSServiceAverageCPUUtilization", label = "", target = s.autoscaling.cpu_target } } : {},
     s.autoscaling.memory_target > 0 ? { "${k}/memory" = { service = k, metric = "ECSServiceAverageMemoryUtilization", label = "", target = s.autoscaling.memory_target } } : {},
     s.autoscaling.requests_per_target > 0 ? { "${k}/requests" = { service = k, metric = "ALBRequestCountPerTarget", label = s.autoscaling.alb_resource_label, target = s.autoscaling.requests_per_target } } : {},
   )]...)
-  custom_scaling_policies = merge([for k, s in local.autoscaled : { for n, c in s.autoscaling.custom : "${k}/${n}" => merge(c, { service = k, name = n }) }]...)
-  scaling_schedules       = merge([for k, s in local.autoscaled : { for n, sc in s.autoscaling.schedules : "${k}/${n}" => merge(sc, { service = k, name = n }) }]...)
+  custom_scaling_policies = merge([for k, s in local.scaled : { for n, c in s.autoscaling.custom : "${k}/${n}" => merge(c, { service = k, name = n }) }]...)
+  scaling_schedules       = merge([for k, s in local.scaled : { for n, sc in s.autoscaling.schedules : "${k}/${n}" => merge(sc, { service = k, name = n }) }]...)
 
   subnets         = { for k, s in local.services : k => length(s.subnet_ids) > 0 ? s.subnet_ids : var.subnet_ids }
   security_groups = { for k, s in local.services : k => length(s.security_group_ids) > 0 ? s.security_group_ids : var.security_group_ids }
+
+  discovery_created = { for k, s in local.long_running : k => s if s.service_discovery != null ? s.service_discovery.namespace_id != "" : false }
+  service_registry = { for k, s in local.long_running : k => {
+    registry_arn   = s.service_discovery.namespace_id != "" ? aws_service_discovery_service.this[k].arn : s.service_discovery.registry_arn
+    container_name = s.service_discovery.dns_record_type == "SRV" ? (s.service_discovery.container_name != "" ? s.service_discovery.container_name : k) : null
+    container_port = s.service_discovery.dns_record_type == "SRV" ? (s.service_discovery.container_port > 0 ? s.service_discovery.container_port : s.port) : null
+  } if s.service_discovery != null }
 
   load_balancers = { for k, s in local.long_running : k => [
     for lb in s.load_balancers : {
@@ -456,10 +476,13 @@ locals {
   task_floor = { for k, s in local.replica : k => (
     s.autoscaling == null ? s.desired_count : min(concat([s.autoscaling.min], [for sc in values(s.autoscaling.schedules) : sc.min])...)
   ) }
+  running_task_threshold = { for k, s in local.alarmed : k => s.alarms.min_running_tasks != null ? s.alarms.min_running_tasks : lookup(local.task_floor, k, 0) }
   running_task_alarms = {
-    for k, s in local.alarmed : k => local.task_floor[k] if var.container_insights != "disabled" ? (s.workload == "service" ? local.task_floor[k] > 0 : false) : false
+    for k, s in local.alarmed : k => local.running_task_threshold[k] if var.container_insights != "disabled" ? (s.workload == "service" ? local.running_task_threshold[k] > 0 : false) : false
   }
-  alarm_actions = var.sns_topic_arn == "" ? [] : [var.sns_topic_arn]
+  alarm_actions           = length(var.alarm_actions) > 0 ? var.alarm_actions : (var.sns_topic_arn == "" ? [] : [var.sns_topic_arn])
+  ok_actions              = length(var.ok_actions) > 0 ? var.ok_actions : local.alarm_actions
+  alarms_publish_to_topic = length(local.alarmed) == 0 || var.sns_topic_arn == "" ? false : contains(concat(local.alarm_actions, local.ok_actions), var.sns_topic_arn)
 
   event_rules_enabled = local.create ? (var.create_event_rules ? var.sns_topic_arn != "" : false) : false
   one_off_families    = [for k, s in local.services : "family:${var.name}-${k}" if contains(["scheduled", "task"], s.workload)]
@@ -558,6 +581,10 @@ locals {
   ]]))
   unrecorded_shell_services = var.execute_command.logging == "NONE" ? keys(local.exec_services) : []
   imds_reachable_workloads  = [for k, s in local.services : k if s.launch == "EC2" ? contains(["bridge", "host"], s.network_mode) : false]
+
+  externally_deployed            = sort(concat(keys(local.static_ignored), keys(local.autoscaled_ignored)))
+  unbounded_log_groups           = [for k, d in local.log_retention : k if d == 0]
+  created_log_groups_without_key = [for k, s in local.created_log_groups : k if local.log_key[k] == ""]
 
   services_with_az_rebalancing = [for k, on in local.az_rebalancing : k if on]
 }

@@ -132,6 +132,62 @@ run "unbounded_log_retention_is_silent_once_acknowledged" {
   }
 }
 
+run "an_unbounded_workload_log_group_warns" {
+  command = plan
+
+  variables {
+    services = {
+      api = { image = "r/a:1", desired_count = 2, log_group = { retention_days = 0 } }
+    }
+  }
+
+  expect_failures = [check.log_retention_is_bounded]
+}
+
+run "an_unbounded_workload_log_group_is_silent_once_acknowledged" {
+  command = plan
+
+  variables {
+    services = {
+      api = { image = "r/a:1", desired_count = 2, log_group = { retention_days = 0 } }
+    }
+    acknowledged_checks = ["log_retention_is_bounded"]
+  }
+
+  assert {
+    condition     = contains(output.governance.acknowledged_checks, "log_retention_is_bounded")
+    error_message = "an acknowledged check is silent and listed in governance."
+  }
+}
+
+run "alarms_off_with_no_topic_warn" {
+  command = plan
+
+  variables {
+    sns_topic_arn = ""
+    create_alarms = false
+    alarm_actions = ["arn:aws:sns:eu-west-2:111122223333:pager"]
+  }
+
+  expect_failures = [check.somebody_hears_a_failure]
+}
+
+run "alarms_off_with_no_topic_are_silent_once_acknowledged" {
+  command = plan
+
+  variables {
+    sns_topic_arn       = ""
+    create_alarms       = false
+    alarm_actions       = ["arn:aws:sns:eu-west-2:111122223333:pager"]
+    acknowledged_checks = ["somebody_hears_a_failure"]
+  }
+
+  assert {
+    condition     = contains(output.governance.acknowledged_checks, "somebody_hears_a_failure")
+    error_message = "an acknowledged check is silent and listed in governance."
+  }
+}
+
 run "logs_without_a_customer_key_warn" {
   command = plan
 

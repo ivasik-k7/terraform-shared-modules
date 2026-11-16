@@ -6,7 +6,7 @@
 bulk API** on **2026-11-16** (`AmazonECS` offer published 2026-11-11,
 `AmazonCloudWatch` offer published 2026-11-04). Rates marked *not pulled* were
 not in those offers.
-**Basis:** `terraform-aws-ecs` 1.0.0 (unreleased), module defaults
+**Basis:** `terraform-aws-ecs` 3.0.0 (unreleased), module defaults
 (`container_insights = "enabled"`, `log_retention_days = 30`, alarms on).
 730 hours per month.
 

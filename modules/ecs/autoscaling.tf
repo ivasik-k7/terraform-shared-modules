@@ -1,13 +1,15 @@
 resource "aws_appautoscaling_target" "this" {
-  for_each = local.autoscaled
+  for_each = local.scaled
 
   service_namespace  = "ecs"
   scalable_dimension = "ecs:service:DesiredCount"
-  resource_id        = "service/${var.name}/${aws_ecs_service.autoscaled[each.key].name}"
+  resource_id        = "service/${var.name}/${each.key}"
   min_capacity       = each.value.autoscaling.min
   max_capacity       = each.value.autoscaling.max
 
   tags = local.workload_tags[each.key]
+
+  depends_on = [aws_ecs_service.autoscaled, aws_ecs_service.autoscaled_ignored]
 }
 
 resource "aws_appautoscaling_policy" "target_tracking" {
@@ -21,9 +23,9 @@ resource "aws_appautoscaling_policy" "target_tracking" {
 
   target_tracking_scaling_policy_configuration {
     target_value       = each.value.target
-    scale_in_cooldown  = local.autoscaled[each.value.service].autoscaling.scale_in_cooldown
-    scale_out_cooldown = local.autoscaled[each.value.service].autoscaling.scale_out_cooldown
-    disable_scale_in   = local.autoscaled[each.value.service].autoscaling.disable_scale_in
+    scale_in_cooldown  = local.scaled[each.value.service].autoscaling.scale_in_cooldown
+    scale_out_cooldown = local.scaled[each.value.service].autoscaling.scale_out_cooldown
+    disable_scale_in   = local.scaled[each.value.service].autoscaling.disable_scale_in
 
     predefined_metric_specification {
       predefined_metric_type = each.value.metric
@@ -43,9 +45,9 @@ resource "aws_appautoscaling_policy" "custom" {
 
   target_tracking_scaling_policy_configuration {
     target_value       = each.value.target_value
-    scale_in_cooldown  = local.autoscaled[each.value.service].autoscaling.scale_in_cooldown
-    scale_out_cooldown = local.autoscaled[each.value.service].autoscaling.scale_out_cooldown
-    disable_scale_in   = local.autoscaled[each.value.service].autoscaling.disable_scale_in
+    scale_in_cooldown  = local.scaled[each.value.service].autoscaling.scale_in_cooldown
+    scale_out_cooldown = local.scaled[each.value.service].autoscaling.scale_out_cooldown
+    disable_scale_in   = local.scaled[each.value.service].autoscaling.disable_scale_in
 
     customized_metric_specification {
       namespace   = each.value.namespace
