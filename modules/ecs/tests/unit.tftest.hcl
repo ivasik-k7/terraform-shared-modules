@@ -688,12 +688,13 @@ run "an_execution_role_reads_only_its_own_secrets" {
   }
 
   assert {
-    condition = jsondecode(aws_iam_role_policy.execution_module["api"].policy).Statement == [
+    condition = jsonencode(jsondecode(aws_iam_role_policy.execution_module["api"].policy).Statement) == jsonencode([
       {
-        Sid      = "ReadSecrets"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = ["arn:aws:secretsmanager:eu-west-2:111122223333:secret:db-AbCdEf", "arn:aws:secretsmanager:eu-west-2:111122223333:secret:partner-??????"]
+        Sid    = "ReadSecrets"
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        # db-AbCdEf may be a full ARN or a name ending in six characters: both forms.
+        Resource = ["arn:aws:secretsmanager:eu-west-2:111122223333:secret:db-AbCdEf", "arn:aws:secretsmanager:eu-west-2:111122223333:secret:db-AbCdEf-??????", "arn:aws:secretsmanager:eu-west-2:111122223333:secret:partner-??????"]
       },
       { Sid = "ReadParameters", Effect = "Allow", Action = ["ssm:GetParameters"], Resource = ["arn:aws:ssm:eu-west-2:111122223333:parameter/orders/flag"] },
       {
@@ -710,7 +711,7 @@ run "an_execution_role_reads_only_its_own_secrets" {
         Resource  = "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"
         Condition = { StringEquals = { "kms:ViaService" = "logs.eu-west-2.amazonaws.com" } }
       },
-    ]
+    ])
     error_message = "the execution role reads exactly its own secrets (JSON-key suffix trimmed, partial ARN wildcarded), its parameter, and the key only through Secrets Manager or SSM."
   }
 
@@ -994,7 +995,7 @@ run "a_dead_letter_queue_is_writable_by_the_scheduler" {
   }
 
   assert {
-    condition     = one([for r in output.kms_key_policy_requirements : r.principals.arns if r.sid == "ScheduleDeadLetters0"]) == tolist(["arn:aws:iam::111122223333:role/orders-scheduler"])
+    condition     = jsonencode(one([for r in output.kms_key_policy_requirements : r.principals.arns if r.sid == "ScheduleDeadLetters0"])) == jsonencode(["arn:aws:iam::111122223333:role/orders-scheduler"])
     error_message = "the DLQ key owner is told to allow the scheduler role."
   }
 }

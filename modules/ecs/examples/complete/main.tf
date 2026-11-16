@@ -235,6 +235,7 @@ module "ecs" {
 
   acknowledged_checks = [
     "shell_access_is_intended",
+    "containers_stay_on_their_side", # the log shipper reads the host's Docker logs
   ]
 }
 

@@ -14,8 +14,9 @@ Every input, shaped like a migrated on-premises application on one cluster:
 It sets every key input (logs, secrets, Fargate ephemeral storage, managed
 storage, ECS Exec, the topic), so `kms_key_policy_requirements` lists every
 entry the module can produce, and `required_tag_keys` makes the cost tags
-mandatory. The one acknowledged check is `shell_access_is_intended`, for the
-worker's ECS Exec; `output.governance.shell_access` shows a reviewer who has it.
+mandatory. Two checks are acknowledged: `shell_access_is_intended`, for the
+worker's ECS Exec, and `containers_stay_on_their_side`, for the shipper's host
+path. `output.governance` (`shell_access`, `host_access`) shows a reviewer both.
 
 What fails in it: the ARNs are placeholders, so it plans (CI plans it against a
 mocked provider) and would fail at apply.
