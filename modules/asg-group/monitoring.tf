@@ -1,52 +1,67 @@
-# optional alarms. cpu_high comes from AWS/EC2 (per-ASG dimension); in_service_low
-# uses GroupInServiceInstances (AWS/AutoScaling) which enabled_metrics collects.
-
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
-  count = local.create && var.create_cloudwatch_alarms ? 1 : 0
+  count = local.cpu_alarm ? 1 : 0
 
   alarm_name          = "${var.name}-cpu-high"
+  alarm_description   = "${var.name}: average CPU above ${var.alarm_cpu_percent}% for ${var.alarm_evaluation_periods} periods of ${var.alarm_period} seconds. With scaling at max_size, the fleet is out of headroom."
   namespace           = "AWS/EC2"
   metric_name         = "CPUUtilization"
-  comparison_operator = "GreaterThanThreshold"
-  threshold           = var.alarm_cpu_threshold
-  evaluation_periods  = var.alarm_evaluation_periods
-  period              = var.alarm_period
+  dimensions          = { AutoScalingGroupName = local.group_name }
   statistic           = "Average"
+  period              = var.alarm_period
+  evaluation_periods  = var.alarm_evaluation_periods
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.alarm_cpu_percent
   treat_missing_data  = "notBreaching"
-  alarm_description   = "Node group ${var.name} average CPU above ${var.alarm_cpu_threshold}%"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.ok_actions
 
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.this[0].name
-  }
-
-  alarm_actions = var.alarm_actions
-  ok_actions    = var.ok_actions
-
-  tags = merge(local.tags, { Name = "${var.name}-cpu-high" })
+  tags = local.common_tags
 }
 
-# GroupInServiceInstances only exists when enabled_metrics collects it -
-# otherwise the alarm would sit in INSUFFICIENT_DATA / permanently breaching.
+# Missing data is breaching: a group with nothing in service publishes nothing.
 resource "aws_cloudwatch_metric_alarm" "in_service_low" {
-  count = local.create && var.create_cloudwatch_alarms && contains(var.enabled_metrics, "GroupInServiceInstances") ? 1 : 0
+  count = local.in_service_alarm ? 1 : 0
 
   alarm_name          = "${var.name}-in-service-low"
+  alarm_description   = "${var.name}: fewer than ${local.in_service_threshold} instances in service for ${var.alarm_evaluation_periods} periods of ${var.alarm_period} seconds. Launches are failing, or instances are being replaced faster than they become healthy."
   namespace           = "AWS/AutoScaling"
   metric_name         = "GroupInServiceInstances"
-  comparison_operator = "LessThanThreshold"
-  threshold           = coalesce(var.alarm_min_in_service, var.min_size)
-  evaluation_periods  = var.alarm_evaluation_periods
+  dimensions          = { AutoScalingGroupName = local.group_name }
+  statistic           = "Minimum"
   period              = var.alarm_period
-  statistic           = "Average"
+  evaluation_periods  = var.alarm_evaluation_periods
+  comparison_operator = "LessThanThreshold"
+  threshold           = local.in_service_threshold
   treat_missing_data  = "breaching"
-  alarm_description   = "Node group ${var.name} in-service instances below ${coalesce(var.alarm_min_in_service, var.min_size)}"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.ok_actions
 
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.this[0].name
-  }
+  tags = local.common_tags
+}
 
-  alarm_actions = var.alarm_actions
-  ok_actions    = var.ok_actions
+# ---------------------------------------------------------------------------
+# Events: the failures that leave an apply green.
+# https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-event-reference.html
+# ---------------------------------------------------------------------------
 
-  tags = merge(local.tags, { Name = "${var.name}-in-service-low" })
+resource "aws_cloudwatch_event_rule" "this" {
+  for_each = local.event_rules
+
+  name        = "${var.name}-${each.key}"
+  description = each.value.description
+  event_pattern = jsonencode({
+    source        = ["aws.autoscaling"]
+    "detail-type" = each.value.detail_type
+    detail        = { AutoScalingGroupName = [local.group_name] }
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "this" {
+  for_each = local.event_rules
+
+  rule      = aws_cloudwatch_event_rule.this[each.key].name
+  target_id = "sns"
+  arn       = var.sns_topic_arn
 }

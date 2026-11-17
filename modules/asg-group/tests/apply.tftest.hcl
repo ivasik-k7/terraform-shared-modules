@@ -1,95 +1,63 @@
-# mocked-provider apply. proves the resources assemble end to end without creds.
+# A mocked apply: proves the resources assemble end to end, which a plan
+# cannot, because a plan leaves the group's computed name unknown. It proves
+# nothing about AWS accepting the requests.
 
 mock_provider "aws" {
-  # the assume-role doc must be valid JSON for aws_iam_role to accept it
-  mock_data "aws_iam_policy_document" {
-    defaults = {
-      json = "{\"Version\":\"2012-10-17\"}"
-    }
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
   }
-
-  # the ASG validates that launch_template.id begins with 'lt-'
+  mock_data "aws_region" {
+    defaults = { region = "eu-west-2" }
+  }
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "111122223333" }
+  }
+  # The provider checks that a launch template ID starts with lt-.
   mock_resource "aws_launch_template" {
-    defaults = {
-      id = "lt-00000000000000000"
-    }
+    defaults = { id = "lt-00000000000000000", latest_version = 3 }
+  }
+  mock_resource "aws_autoscaling_group" {
+    defaults = { name = "orders-20261117000000000000000001", arn = "arn:aws:autoscaling:eu-west-2:111122223333:autoScalingGroup:11111111-2222-3333-4444-555555555555:autoScalingGroupName/orders-20261117000000000000000001" }
   }
 }
 
-run "full_apply" {
+run "the_whole_fleet_assembles" {
   command = apply
 
   variables {
-    name                    = "fleet"
-    ami                     = "ami-0123456789abcdef0"
-    subnet_ids              = ["subnet-aaaa1111", "subnet-bbbb2222"]
-    vpc_id                  = "vpc-12345678"
-    create_instance_profile = true
-    iam_role_policies = {
-      ssm = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-      cw  = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-    }
-    create_security_group = true
-    ebs_block_devices = [
-      { device_name = "/dev/sdf", volume_size = 100 },
-    ]
-    instance_types = ["t3.medium", "t3a.medium"]
-    spot = {
-      on_demand_base_capacity                  = 1
-      on_demand_percentage_above_base_capacity = 25
-    }
-    instance_refresh = { min_healthy_percentage = 90 }
+    name               = "orders"
+    ami                = "ami-0123456789abcdef0"
+    subnet_ids         = ["subnet-0a1b2c3d4e5f60001", "subnet-0a1b2c3d4e5f60002"]
+    security_group_ids = ["sg-0a1b2c3d4e5f60001"]
+    min_size           = 2
+    max_size           = 6
+    kms_key_arn        = "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+    sns_topic_arn      = "arn:aws:sns:eu-west-2:111122223333:alerts"
+    instance_types     = ["m7i.large", "m6i.large"]
+    purchase_options   = { on_demand_base_capacity = 1, on_demand_percentage_above_base_capacity = 50 }
+    lifecycle_hooks    = { drain = { transition = "TERMINATING", default_result = "CONTINUE" } }
     target_tracking_policies = {
       cpu = { predefined_metric_type = "ASGAverageCPUUtilization", target_value = 60 }
     }
-    create_cloudwatch_alarms = true
-    alarm_actions            = ["arn:aws:sns:us-east-1:123456789012:alerts"]
-    tags                     = { Project = "platform", ManagedBy = "Terraform" }
   }
 
   assert {
-    condition     = aws_autoscaling_group.this[0].arn != null
-    error_message = "ASG should be created and expose an ARN"
+    condition     = aws_autoscaling_group.this[0].mixed_instances_policy[0].launch_template[0].launch_template_specification[0].version == "3"
+    error_message = "the group launches the template's exact latest version, which instance refresh and rollback need."
   }
 
   assert {
-    condition     = length(aws_autoscaling_group.this[0].mixed_instances_policy) == 1 && length(aws_autoscaling_group.this[0].launch_template) == 0
-    error_message = "Spot fleet should use a mixed_instances_policy block"
+    condition     = aws_autoscaling_lifecycle_hook.this["drain"].autoscaling_group_name == "orders-20261117000000000000000001" && aws_autoscaling_policy.target_tracking["cpu"].autoscaling_group_name == "orders-20261117000000000000000001"
+    error_message = "hooks and policies attach to the group the module created."
   }
 
   assert {
-    condition     = length(aws_autoscaling_group.this[0].mixed_instances_policy[0].launch_template[0].override) == 2
-    error_message = "Both instance types should appear as mixed-instances overrides"
+    condition     = jsondecode(aws_cloudwatch_event_rule.this["launch-failed"].event_pattern).detail.AutoScalingGroupName == ["orders-20261117000000000000000001"]
+    error_message = "the launch-failure rule matches this group only."
   }
 
   assert {
-    condition     = length(aws_iam_role_policy_attachment.this) == 2
-    error_message = "Both managed policies should attach"
-  }
-
-  assert {
-    condition     = length(aws_cloudwatch_metric_alarm.cpu_high) == 1 && length(aws_cloudwatch_metric_alarm.in_service_low) == 1
-    error_message = "Both alarms should be created"
-  }
-}
-
-run "on_demand_minimal_apply" {
-  command = apply
-
-  variables {
-    name               = "fleet"
-    ami                = "ami-0123456789abcdef0"
-    subnet_ids         = ["subnet-aaaa1111"]
-    security_group_ids = ["sg-existing01"] # BYO SG (no managed SG, no default fallback)
-  }
-
-  assert {
-    condition     = length(aws_autoscaling_group.this[0].launch_template) == 1 && length(aws_autoscaling_group.this[0].mixed_instances_policy) == 0
-    error_message = "On-demand fleet should use a plain launch_template block"
-  }
-
-  assert {
-    condition     = length(aws_iam_role.this) == 0 && length(aws_security_group.this) == 0
-    error_message = "Minimal generic fleet creates no role or managed SG (BYO SG)"
+    condition     = output.autoscaling_group_arn == "arn:aws:autoscaling:eu-west-2:111122223333:autoScalingGroup:11111111-2222-3333-4444-555555555555:autoScalingGroupName/orders-20261117000000000000000001"
+    error_message = "the group's ARN is output for an ECS capacity provider."
   }
 }

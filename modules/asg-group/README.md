@@ -1,413 +1,219 @@
-# Auto Scaling Group
+# terraform-aws-asg-group
 
-A universal Amazon EC2 **Auto Scaling Group** module — launch template + ASG +
-optional instance IAM + optional security group + scaling + monitoring. It is
-**workload-agnostic**: you drive the AMI, user-data, IAM policies, tags, and
-scaling to fit whatever runs on the fleet.
+An EC2 Auto Scaling group for a regulated estate: a hardened launch template
+(IMDSv2, encrypted volumes, no SSH, Session Manager), on-demand, mixed or
+attribute-based Spot fleets, instance refresh with rollback, maintenance and
+warm pools, target tracking and predictive scaling, and the signals for the
+failures that leave an apply green: launches that fail on a KMS grant or a
+quota, and refreshes that roll back.
 
-Use it for ECS EC2 capacity, a web/app fleet behind an ALB, batch workers, or
-self-managed Kubernetes nodes — anything that is "a group of EC2 instances that
-scales." It outputs the **ASG ARN**, so consumers like the `ecs-orchestrator`
-capacity providers can reference it directly.
-
-> Not a NAT/router fleet: `source_dest_check` can't be set via a launch template,
-> so forwarding appliances need a different pattern (a lifecycle hook or the
-> dedicated `ec2` module).
-
-> No ECS coupling is baked in. ECS is just one consumer — see *ECS compatibility*
-> below for the four generic knobs that make the ASG ECS-ready.
-
-## Design principles
-
-- **Universal, not opinionated about the workload.** AMI, `user_data`, IAM
-  policies, and tags are all caller-supplied. The module builds the *fleet*; what
-  runs on it is your business.
-- **Secure by default.** IMDSv2 enforced, encrypted root (and extra) volumes, no
-  inbound on the managed SG, no IAM role unless you ask for one.
-- **Comprehensive.** Mixed on-demand + Spot, target-tracking + scheduled scaling,
-  instance refresh, warm pools, lifecycle hooks, ALB/NLB target-group
-  registration, ASG metrics, and CloudWatch alarms — all optional.
-- **Stable & composable.** A single `create` toggle, keyed maps for collections,
-  `ignore_changes = [desired_capacity]` so an autoscaler/capacity provider owns
-  the live count without fighting Terraform.
-
-## Secure defaults
-
-- **IMDSv2 enforced** (`http_tokens = required`); set `metadata_hop_limit = 2` for
-  containerized workloads that reach IMDS through the host.
-- **Encrypted root volume** (gp3) and encrypted `ebs_block_devices` by default.
-- **Managed SG ships zero inbound** (egress allow-all so hosts reach repos/SSM).
-- **No implicit default SG.** A security group is required — pass
-  `security_group_ids` or set `create_security_group = true`. The plan **fails**
-  rather than letting instances fall back to the permissive VPC default SG.
-- **No IAM role unless requested** — `create_instance_profile = false` by default;
-  attach exactly the policies you need via `iam_role_policies`.
-- **ASG group metrics on** by default (free, 1-minute) so the fleet is observable.
-- **Egress is allow-all by default** (so hosts reach package repos / SSM / ECR).
-  To lock it down, override `security_group_egress_rules` (e.g. 443 to your VPC
-  endpoints' prefix list).
-
-## Operational notes
-
-- **`desired_capacity` is write-once.** Changes are ignored after create
-  (`ignore_changes`) so an autoscaler / ECS capacity provider / scheduled action
-  owns the live count. For a static fleet, control size with `min_size`/`max_size`
-  or `scheduled_actions` — editing `desired_capacity` later is a no-op.
-- **Spot defaults to 100% Spot.** Opting into `spot` with no other settings means
-  the whole fleet can be reclaimed at once — set `on_demand_base_capacity >= 1`
-  for an always-on baseline, and list several `instance_types` for Spot depth.
-- **Public IPs / placement.** Set `associate_public_ip_address` to force it via a
-  network interface; otherwise the subnet's `map_public_ip_on_launch` decides.
-  Use `subnet_ids` **or** `availability_zones`, never both.
-
-## Quick start (generic fleet)
+**Stage:** 2.0.0 release candidate. Stable once a security review reports no
+open Critical or High finding ([GOVERNANCE](../../docs/GOVERNANCE.md)).
 
 ```hcl
-data "aws_vpc" "default" {
-  default = true
-}
+module "fleet" {
+  source  = "app.terraform.io/<org>/asg-group/aws"
+  version = "~> 2.0"
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+  name               = "orders-web"
+  ami                = "ami-0123456789abcdef0" # pinned: a new image is a reviewed change
+  subnet_ids         = var.private_subnet_ids # two AZs or more
+  security_group_ids = [var.instance_sg_id]   # required; the module creates none
+  min_size           = 2
+  max_size           = 10
+
+  kms_key_arn   = var.ebs_key_arn # hand output.kms_key_policy_requirements to its owner first
+  sns_topic_arn = var.alerts_topic_arn
+
+  target_tracking_policies = {
+    cpu = { predefined_metric_type = "ASGAverageCPUUtilization", target_value = 60 }
   }
 }
-
-module "fleet" {
-  source = "../../modules/asg-group"
-
-  name              = "workers"
-  ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-  subnet_ids        = data.aws_subnets.default.ids
-
-  # a security group is required (fail-closed): create one or pass your own
-  create_security_group = true
-  vpc_id                = data.aws_vpc.default.id
-
-  instance_type = "t3.medium"
-  min_size      = 2
-  max_size      = 10
-}
 ```
+
+Re-export the contract outputs as root outputs of the workspace, or read them
+with `tfe_outputs`: `kms_key_policy_requirements` goes to the key owners (or
+into [`modules/kms`](../kms) as a consumer), `notification_requirements` to
+whoever owns the topic, `deployer_requirements` to whoever owns the apply role,
+and `network_contract` to the network team. `autoscaling_group_arn` is what an
+ECS capacity provider takes ([`modules/ecs`](../ecs), `ec2_capacity_providers`).
+
+## Requirements
+
+| Component | Supported | What a workspace must do |
+|---|---|---|
+| Terraform | `>= 1.9.0` | Set the workspace's Terraform version to 1.9 or later |
+| `hashicorp/aws` | `>= 6.57.1, < 7.0.0` | Upgrade the workspace to aws 6.x and commit the lock file. Unlike most modules here, 2.x does not support aws 5.x: it uses `instance_lifecycle_policy`, `reservations-then-balanced`, `network_performance_options` and placement groups by ID, which exist only in 6.x |
+| Account | The Auto Scaling service-linked role | AWS creates `AWSServiceRoleForAutoScaling` on first use if the apply role may; `deployer_requirements` includes that permission |
+| Network | Private subnets with the Session Manager endpoints | `network_contract` lists them |
+
+## What the module refuses
+
+These fail at plan, with a message naming the field.
+
+| Refused | Because |
+|---|---|
+| No `security_group_ids` | Instances would fall back to the VPC's default group |
+| Both `ami` and `ami_ssm_parameter`, or neither | The image would be ambiguous or missing |
+| A warm pool with Spot or instance weights | AWS does not support either with warm pools ([warm pools](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-warm-pools.html)) |
+| Scaling policies or scheduled `desired_capacity` with `ignore_desired_capacity_changes = false` | Every apply would set the count back, fighting the scaler |
+| `instance_weights` for a type not in the fleet, or with `instance_requirements` | The weight would silently apply to nothing |
+| `instance_refresh.alarm_names` without `auto_rollback`; checkpoints not ascending or not ending at 100; `launch_template` as a trigger | AWS rejects them, or the provider warns the trigger is implicit |
+| `terminate_hook_abandon` without a TERMINATING hook | It would never apply |
+| An `initial` TERMINATING hook | Only launch hooks need to see the first instances |
+| `spot_instance_pools` with anything but `lowest-price`; `max_capacity_buffer` while honoring max | AWS rejects them |
+| `iops` or `throughput` on a volume type without them; an extra volume on the root device | The launch template is rejected, or a volume is lost |
+| A `required_tag_keys` key missing or empty in `tags` | Instances would be unattributable in Cost Explorer and invisible to tag-based SCPs |
+| A `name` over 36 characters | The instance role's `name_prefix` is capped at 38 |
+
+### Advisory checks
+
+Eleven `check` blocks warn without refusing. Each is silenced by naming it in
+`acknowledged_checks`, and the decision is then listed in `output.governance`.
+All are silent when `create = false`.
+
+| Check | Warns when |
+|---|---|
+| `somebody_hears_a_failure` | no topic and no alarm actions, or both alarms and event rules are off |
+| `fleet_survives_an_az` | one subnet, or a capacity floor (min_size or a scheduled one) below two |
+| `spot_fleets_keep_an_on_demand_floor` | the whole fleet is Spot |
+| `volumes_use_a_customer_key` | `kms_key_arn` is empty |
+| `burstable_credits_are_bounded` | `cpu_credits = "unlimited"` on a burstable fleet |
+| `instances_are_reached_without_ssh_keys` | `key_name` is set |
+| `instances_have_no_public_ip` | `public_ip = "assign"` |
+| `launch_template_changes_reach_the_fleet` | instance refresh is off |
+| `containers_cannot_reach_instance_credentials` | `metadata_hop_limit` above 1 |
+| `ami_is_pinned` | the AMI comes from `ami_ssm_parameter` |
+| `retained_instances_are_cleaned_up` | `terminate_hook_abandon = "retain"` |
+
+## Behaviour to know about
+
+**Volumes under a customer key need the service-linked role in the key
+policy.** Auto Scaling launches with `AWSServiceRoleForAutoScaling` (or the
+custom-suffix role in `service_linked_role_arn`), which has no access to
+customer keys. Without the two statements in `kms_key_policy_requirements`,
+every launch fails with `Client.InternalError: Client error on launch` while
+the apply stays green
+([troubleshooting](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ts-as-instancelaunchfailure.html)).
+The `launch-failed` event rule reports it.
+
+**Who owns the instance count.** With `ignore_desired_capacity_changes = true`
+(the default) the group is `aws_autoscaling_group.this` and ignores
+`desired_capacity` after creation, so scaling policies, scheduled actions and
+an ECS capacity provider own it. With `false` it is `aws_autoscaling_group.static`
+and every apply sets the count. Flipping it on an existing group moves the
+group between the two addresses; write a root `moved` block
+(`module.<call>.aws_autoscaling_group.this[0]` to `.static[0]` or back), or the
+group is replaced.
+
+**Scheduled actions that change `min_size` or `max_size` are undone by the
+next apply.** Terraform owns both bounds. An apply at night, after a schedule
+lowered `min_size`, raises it again. Schedule `desired_capacity`, or apply
+outside those windows.
+
+**Initial lifecycle hooks replace the group when they change.** The provider
+treats `initial_lifecycle_hook` as ForceNew (`internal/service/autoscaling/group.go`
+at 6.71.0), and a new group means new instances and, behind an ECS capacity
+provider, a new capacity provider. Hooks are therefore separate resources,
+updated in place; `initial = true` is for a launch hook that must also hold the
+instances launched when the group is created.
+
+**Instance refresh is on by default, with rollback.** Any change to the launch
+template (a new AMI, user data, a tag on instances) or to the instance mix
+starts a rolling refresh that skips instances already up to date and rolls back
+on failure or on `alarm_names`. An apply that changes the template while a
+refresh runs cancels it and starts a new one (provider `startInstanceRefresh`).
+The group launches the template's numbered latest version, which rollback
+requires.
+
+**The AMI is resolved at plan, not at launch.** `ami_ssm_parameter` is read at
+every plan, so the template always holds an AMI ID. A template that resolves
+`resolve:ssm:` at launch rules out rollback, skip matching, warm pools and
+attribute-based selection
+([SSM parameters](https://docs.aws.amazon.com/autoscaling/ec2/userguide/using-systems-manager-parameters.html)).
+With the parameter, a new image published by AWS moves the template at the next
+unrelated apply; pin `ami` to take images deliberately.
+
+**Retained instances keep billing.** With `terminate_hook_abandon = "retain"`,
+an instance whose drain hook ends in ABANDON stays, out of service and billed,
+while a replacement launches; refresh and `max_instance_lifetime` ignore it. It
+goes only when someone calls `TerminateInstanceInAutoScalingGroup` and completes
+the hook again ([instance lifecycle policy](https://docs.aws.amazon.com/autoscaling/ec2/userguide/instance-lifecycle-policy.html)).
+
+**Burstable fleets default to standard credits.** AWS's default for T3 is
+unlimited, which bills surplus credits with no ceiling. The module sends
+`standard` when every type is burstable, and nothing otherwise.
+
+**The deployer needs more than Auto Scaling permissions.** Creating or updating
+a group with a launch template is authorized as `ec2:RunInstances` and
+`ec2:CreateTags`, and handing over the instance role as `iam:PassRole`
+([launch template permissions](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-launch-template-permissions.html)).
+`deployer_requirements` is known at plan; it names the role by its `<name>-`
+prefix, because IAM adds the suffix at creation.
 
 ## Examples
 
-| #   | Scenario          | Shows                                                                           |
-| --- | ----------------- | ------------------------------------------------------------------------------- |
-| 1   | Web fleet + ALB   | SSM AMI, ALB target-group registration, CPU + request-count tracking, schedule, alarms |
-| 2   | Spot mixed fleet  | mixed on-demand + Spot across instance types                                     |
-| 3   | ECS capacity      | the generic knobs that make the ASG an ECS capacity provider                     |
-
-Runnable: [`examples/asg-group`](../../examples/asg-group) (web fleet) and
-[`examples/ecs-orchestrator-capacity-provider`](../../examples/ecs-orchestrator-capacity-provider)
-(ECS). The key snippets are inlined below.
-
-### 1. Web fleet behind an ALB (target tracking + schedule + alarms)
-
-```hcl
-module "fleet" {
-  source = "../../modules/asg-group"
-
-  name              = "web-fleet"
-  ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-  subnet_ids        = var.private_subnet_ids
-  security_group_ids = [aws_security_group.web.id]
-
-  instance_type = "t3.small"
-  min_size      = 2
-  max_size      = 12
-
-  create_instance_profile = true
-  iam_role_policies = {
-    ssm = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-  }
-
-  user_data = <<-EOT
-    #!/bin/bash
-    dnf install -y nginx
-    systemctl enable --now nginx
-  EOT
-
-  # register with the ALB and let ELB health replace bad hosts
-  target_group_arns = [module.alb.target_group_arns["web"]]
-  health_check_type = "ELB"
-
-  target_tracking_policies = {
-    cpu = { predefined_metric_type = "ASGAverageCPUUtilization", target_value = 55 }
-    reqs = {
-      predefined_metric_type = "ALBRequestCountPerTarget"
-      target_value           = 1000
-      resource_label         = "${module.alb.arn_suffix}/${module.alb.target_group_arn_suffixes["web"]}"
-    }
-  }
-
-  scheduled_actions = {
-    business_hours = { recurrence = "0 8 * * MON-FRI", min_size = 4 }
-    off_hours      = { recurrence = "0 20 * * *", min_size = 2 }
-  }
-
-  instance_refresh         = { min_healthy_percentage = 90 }
-  create_cloudwatch_alarms = true
-  alarm_actions            = [aws_sns_topic.alerts.arn]
-}
-```
-
-### 2. Spot mixed-instances fleet
-
-```hcl
-module "batch" {
-  source = "../../modules/asg-group"
-
-  name              = "batch"
-  ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-  subnet_ids        = var.private_subnet_ids
-
-  instance_type  = "c6i.large"
-  instance_types = ["c6i.large", "c6a.large", "c5.large"] # diversify for spot depth
-  min_size       = 0
-  max_size       = 50
-
-  spot = {
-    on_demand_base_capacity                  = 1  # one always-on host
-    on_demand_percentage_above_base_capacity = 0  # the rest all spot
-  }
-  # capacity_rebalance is forced on automatically when spot is set
-}
-```
-
-### 3. ECS capacity (compatibility via generic knobs)
-
-The module has no ECS code. You make the ASG an ECS capacity provider with four
-plain inputs, then hand the ARN to `ecs-orchestrator`:
-
-```hcl
-module "nodes" {
-  source = "../../modules/asg-group"
-
-  name              = "platform-cp-nodes"
-  ami_ssm_parameter = "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
-  subnet_ids        = var.private_subnet_ids
-  vpc_id            = var.vpc_id
-
-  metadata_hop_limit = 2 # containers reach IMDS through the host
-
-  user_data = "#!/bin/bash\necho ECS_CLUSTER=platform-cp >> /etc/ecs/ecs.config\n"
-
-  create_instance_profile = true
-  iam_role_policies = {
-    ecs = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
-  }
-  create_security_group = true
-
-  protect_from_scale_in  = true                       # for managed termination protection
-  autoscaling_group_tags = { AmazonECSManaged = "" }  # so the capacity provider claims it
-}
-
-module "ecs" {
-  source       = "../../modules/ecs-orchestrator"
-  cluster_name = "platform-cp"
-  ec2_capacity_providers = {
-    ec2 = {
-      auto_scaling_group_arn         = module.nodes.autoscaling_group_arn
-      managed_termination_protection = "ENABLED" # safe: protect_from_scale_in above
-    }
-  }
-  # services use capacity_provider_strategy (NOT launch_type) + requires_compatibilities ["EC2"]
-}
-```
-
-The four ECS-enabling knobs: `user_data` (join the cluster), `iam_role_policies`
-(agent permissions), `autoscaling_group_tags = { AmazonECSManaged = "" }`,
-`protect_from_scale_in = true`.
-
----
-
-# Inputs
-
-### General
-
-| Name                     | Description                                                                 | Type          | Default | Required |
-| ------------------------ | --------------------------------------------------------------------------- | ------------- | ------- | :------: |
-| `name`                   | Name prefix for the LT, ASG, IAM role, and SG. 1–200 chars.                 | `string`      | n/a     | **yes**  |
-| `create`                 | Master switch. When `false` nothing is created.                             | `bool`        | `true`  |    no    |
-| `tags`                   | Tags on every resource, propagated to instances.                            | `map(string)` | `{}`    |    no    |
-| `autoscaling_group_tags` | Extra ASG-only tags (e.g. `{ AmazonECSManaged = "" }`), propagated.         | `map(string)` | `{}`    |    no    |
-
-### Placement & image
-
-| Name                 | Description                                                              | Type           | Default       | Required |
-| -------------------- | ---------------------------------------------------------------------- | -------------- | ------------- | :------: |
-| `subnet_ids`         | Subnets the ASG launches into (`vpc_zone_identifier`).                  | `list(string)` | `[]`          |    no    |
-| `vpc_id`             | VPC for the managed SG. Required when `create_security_group = true`.   | `string`       | `null`        |    no    |
-| `availability_zones` | AZs for the ASG (usually leave null; subnets decide).                   | `list(string)` | `null`        |    no    |
-| `ami`                | AMI ID. One of `ami`/`ami_ssm_parameter` is required.                   | `string`       | `null`        |    no    |
-| `ami_ssm_parameter`  | SSM parameter resolving to an AMI ID. Used when `ami` is null.          | `string`       | `null`        |    no    |
-| `instance_type`      | Instance type (single-type, or first override with `spot`).            | `string`       | `t3.medium`   |    no    |
-| `instance_types`     | Instance types for a mixed-instances policy. Empty = `[instance_type]`. | `list(string)` | `[]`          |    no    |
-| `instance_weights`   | Per-type `weighted_capacity` for the mixed policy, e.g. `{ "m6i.2xlarge" = 4 }`. | `map(number)` | `{}`     |    no    |
-| `associate_public_ip_address` | Force public-IP on/off via a network interface. Null = subnet decides. | `bool`  | `null`        |    no    |
-| `key_name`           | EC2 key pair. Prefer SSM Session Manager.                              | `string`       | `null`        |    no    |
-
-### Instance config
-
-| Name                    | Description                                                          | Type     | Default      | Required |
-| ----------------------- | ------------------------------------------------------------------ | -------- | ------------ | :------: |
-| `user_data`             | Plain-text user data (module base64-encodes it). Sensitive.        | `string` | `null`       |    no    |
-| `user_data_base64`      | Pre-encoded user data. Conflicts with `user_data`. Sensitive.      | `string` | `null`       |    no    |
-| `enable_detailed_monitoring` | Detailed (1-minute) EC2 monitoring (extra cost).             | `bool`   | `false`      |    no    |
-| `ebs_optimized`         | EBS-optimized. Null = instance-type default.                       | `bool`   | `null`       |    no    |
-| `metadata_hop_limit`    | IMDS hop limit (1–64). Use 2 for containers.                       | `number` | `1`          |    no    |
-| `metadata_tags_enabled` | Expose instance tags via IMDS.                                     | `bool`   | `false`      |    no    |
-| `placement_group`       | Placement group name.                                              | `string` | `null`       |    no    |
-| `tenancy`               | `default` / `dedicated` / `host`.                                  | `string` | `null`       |    no    |
-| `cpu_options`           | `{ core_count, threads_per_core }` (1 disables hyperthreading).    | `object` | `null`       |    no    |
-
-### Storage
-
-| Name                      | Description                                                | Type           | Default      | Required |
-| ------------------------- | --------------------------------------------------------- | -------------- | ------------ | :------: |
-| `root_volume_size`        | Root volume size (GiB).                                   | `number`       | `30`         |    no    |
-| `root_volume_type`        | gp2/gp3/io1/io2.                                          | `string`       | `gp3`        |    no    |
-| `root_volume_iops`        | Root IOPS (io1/io2/gp3).                                  | `number`       | `null`       |    no    |
-| `root_volume_throughput`  | Root throughput MiB/s (gp3).                             | `number`       | `null`       |    no    |
-| `root_volume_encrypted`   | Encrypt root volume.                                      | `bool`         | `true`       |    no    |
-| `root_volume_device_name` | Root device name (`/dev/xvda` AL, `/dev/sda1` Ubuntu).   | `string`       | `/dev/xvda`  |    no    |
-| `kms_key_id`              | KMS key ARN for volume encryption.                       | `string`       | `null`       |    no    |
-| `ebs_block_devices`       | Additional volumes baked into the LT (encrypted).        | `list(object)` | `[]`         |    no    |
-
-`ebs_block_devices[*]`: `device_name` (req), `volume_size=8`, `volume_type="gp3"`, `iops`, `throughput`, `encrypted=true`, `kms_key_id`, `snapshot_id`, `delete_on_termination=true`.
-
-### IAM (optional)
-
-| Name                       | Description                                                       | Type          | Default | Required |
-| -------------------------- | ---------------------------------------------------------------- | ------------- | ------- | :------: |
-| `create_instance_profile`  | Create instance role + profile. Ignored if a profile is given.   | `bool`        | `false` |    no    |
-| `instance_profile_name`    | Existing instance profile to use. Overrides the create flag.     | `string`      | `null`  |    no    |
-| `iam_role_policies`         | Managed policy ARNs to attach, keyed by name.                    | `map(string)` | `{}`    |    no    |
-| `iam_role_inline_policy`   | Inline policy JSON for the created role.                          | `string`      | `null`  |    no    |
-| `iam_permissions_boundary` | Permissions boundary ARN for the created role.                   | `string`      | `null`  |    no    |
-
-### Security group (optional)
-
-| Name                           | Description                                       | Type          | Default   | Required |
-| ------------------------------ | ------------------------------------------------- | ------------- | --------- | :------: |
-| `create_security_group`        | Create a dedicated SG.                            | `bool`        | `false`   |    no    |
-| `security_group_ids`           | Additional SGs to attach.                         | `list(string)`| `[]`      |    no    |
-| `security_group_name`          | Name prefix (defaults to `name`).                 | `string`      | `null`    |    no    |
-| `security_group_ingress_rules` | Ingress rules (keyed map). Empty by default.      | `map(object)` | `{}`      |    no    |
-| `security_group_egress_rules`  | Egress rules (keyed map). Allow-all by default.   | `map(object)` | allow-all |    no    |
-
-Each rule: `{ from_port, to_port, ip_protocol, cidr_ipv4, cidr_ipv6, referenced_security_group_id, prefix_list_id, description }`.
-
-### Capacity & health
-
-| Name                        | Description                                                              | Type           | Default       | Required |
-| --------------------------- | ---------------------------------------------------------------------- | -------------- | ------------- | :------: |
-| `min_size` / `max_size`     | ASG bounds (`max_size >= min_size`).                                    | `number`       | `1` / `3`     |    no    |
-| `desired_capacity`          | Initial desired count. **Write-once** — ignored after create (see Operational notes). | `number` | `null`   |    no    |
-| `protect_from_scale_in`     | Protect instances from scale-in (needed for ECS managed termination).  | `bool`         | `false`       |    no    |
-| `capacity_rebalance`        | Proactive Spot replacement. Forced on with `spot`.                     | `bool`         | `false`       |    no    |
-| `health_check_type`         | `EC2` or `ELB`.                                                         | `string`       | `EC2`         |    no    |
-| `health_check_grace_period` | Grace seconds before health checks.                                     | `number`       | `300`         |    no    |
-| `default_cooldown`          | Cooldown between scaling activities.                                    | `number`       | `null`        |    no    |
-| `default_instance_warmup`   | Warmup before an instance counts toward metrics.                        | `number`       | `null`        |    no    |
-| `termination_policies`      | e.g. `["OldestInstance"]`.                                              | `list(string)` | `["Default"]` |    no    |
-| `target_group_arns`         | ALB/NLB target groups to register with.                                | `list(string)` | `[]`          |    no    |
-| `suspended_processes`       | ASG processes to suspend (e.g. `AZRebalance`).                         | `list(string)` | `[]`          |    no    |
-| `enabled_metrics`           | ASG group metrics to collect (free).                                    | `list(string)` | all Group*    |    no    |
-| `metrics_granularity`       | Granularity of collected metrics (only `1Minute`).                      | `string`       | `1Minute`     |    no    |
-| `wait_for_capacity_timeout` | How long TF waits for healthy capacity (`"0"` to skip).                 | `string`       | `null`        |    no    |
-| `min_elb_capacity`          | Wait for N healthy ELB/target-group instances on create.               | `number`       | `null`        |    no    |
-| `wait_for_elb_capacity`     | Like `min_elb_capacity`, enforced on create **and** update.            | `number`       | `null`        |    no    |
-
-### Spot, refresh, warm pool, lifecycle hooks
-
-- **`spot`** — `{ on_demand_base_capacity=0, on_demand_percentage_above_base_capacity=0, allocation_strategy="price-capacity-optimized", spot_max_price, spot_instance_pools }`. Null = 100% on-demand single type. `spot_instance_pools` is only valid with `allocation_strategy = "lowest-price"`. ⚠️ defaults = 100% Spot — set `on_demand_base_capacity >= 1` for a baseline.
-- **`instance_refresh`** — `{ strategy="Rolling", min_healthy_percentage=90, max_healthy_percentage, instance_warmup, auto_rollback }`. Null = changes apply to new instances only.
-- **`warm_pool`** — `{ pool_state="Stopped", min_size=0, max_group_prepared_capacity }`. Null disables.
-- **`initial_lifecycle_hooks`** — keyed map: `{ lifecycle_transition (req), default_result, heartbeat_timeout, notification_target_arn, role_arn, notification_metadata }`.
-
-### Scaling policies
-
-- **`target_tracking_policies`** — keyed map: `{ predefined_metric_type (req), target_value (req), resource_label, disable_scale_in=false, estimated_instance_warmup }`. Metric ∈ {`ASGAverageCPUUtilization`, `ASGAverageNetworkIn`, `ASGAverageNetworkOut`, `ALBRequestCountPerTarget`}; the ALB one requires `resource_label`.
-- **`scheduled_actions`** — keyed map: `{ min_size, max_size, desired_capacity, recurrence (cron), start_time, end_time, time_zone }`. Omit a size field to leave it unchanged.
-
-### CloudWatch alarms (optional)
-
-| Name                       | Description                                                  | Type           | Default | Required |
-| -------------------------- | ------------------------------------------------------------ | -------------- | ------- | :------: |
-| `create_cloudwatch_alarms` | High-CPU (across the group) + low in-service-instance alarms.| `bool`         | `false` |    no    |
-| `alarm_cpu_threshold`      | Average CPU (%) for the high-CPU alarm.                       | `number`       | `85`    |    no    |
-| `alarm_min_in_service`     | Low-in-service threshold. Null = `min_size`.                  | `number`       | `null`  |    no    |
-| `alarm_evaluation_periods` | Evaluation periods.                                          | `number`       | `3`     |    no    |
-| `alarm_period`             | Period (seconds).                                            | `number`       | `60`    |    no    |
-| `alarm_actions`            | ARNs notified on ALARM.                                       | `list(string)` | `[]`    |    no    |
-| `ok_actions`               | ARNs notified on OK.                                          | `list(string)` | `[]`    |    no    |
-
----
-
-# Outputs
-
-| Name                            | Description                                                              |
-| ------------------------------- | ---------------------------------------------------------------------- |
-| `autoscaling_group_arn`         | ASG ARN — pass to `ecs-orchestrator`'s `ec2_capacity_providers`, or any consumer. |
-| `autoscaling_group_name`        | ASG name.                                                              |
-| `autoscaling_group_id`          | ASG id.                                                                |
-| `launch_template_id`            | Launch template id.                                                    |
-| `launch_template_latest_version`| Latest LT version.                                                     |
-| `iam_role_arn` / `iam_role_name`| Created instance role (null when not created).                        |
-| `instance_profile_name`         | Instance profile attached (created or provided).                       |
-| `instance_profile_arn`          | Created instance profile ARN (null when not created).                 |
-| `security_group_id`             | Created SG id (null when not created).                                |
-| `security_group_ids`            | All SG IDs attached (created + provided).                             |
-| `target_tracking_policy_arns`   | Map: policy key → scaling policy ARN.                                 |
-| `cloudwatch_alarm_names`        | Names of created alarms (empty when disabled).                        |
-
----
-
-# ECS compatibility
-
-This module is intentionally ECS-agnostic. To use the ASG as an ECS capacity
-provider, supply four generic inputs and pass the ARN to `ecs-orchestrator`:
-
-| Need | Input |
-|------|-------|
-| Host joins the cluster | `user_data = "#!/bin/bash\necho ECS_CLUSTER=<name> >> /etc/ecs/ecs.config\n"` |
-| Agent permissions | `iam_role_policies = { ecs = ".../AmazonEC2ContainerServiceforEC2Role" }` (+ `create_instance_profile = true`) |
-| Capacity provider can claim the ASG | `autoscaling_group_tags = { AmazonECSManaged = "" }` |
-| Managed termination protection is safe | `protect_from_scale_in = true` |
-
-Then: `ec2_capacity_providers = { ec2 = { auto_scaling_group_arn = module.nodes.autoscaling_group_arn, managed_termination_protection = "ENABLED" } }`. Services must use `capacity_provider_strategy` (not `launch_type`) and include `"EC2"` in `requires_compatibilities`.
-
----
-
-# Testing
-
-Two offline suites — fully mocked, no AWS credentials, no billable resources:
-
-```bash
-cd modules/asg-group
-terraform init -backend=false
-terraform fmt -check -recursive
-terraform validate
-terraform test                                        # all suites
-terraform test -filter=tests/asg_group.tftest.hcl    # plan-level
-terraform test -filter=tests/apply.tftest.hcl         # mocked-provider apply
-```
-
-- **`tests/asg_group.tftest.hcl`** — plan-level: `basic_on_demand` (minimal,
-  no IAM/SG), `comprehensive` (IAM + SG + extra EBS + target tracking + schedule
-  + alarms), `alb_request_tracking`, `ami_from_ssm` (`override_data`),
-  `spot_mixed`, `ecs_compatible` (the four ECS knobs), `create_false`. Each
-  guardrail has a paired `expect_failures` run: `max_below_min`, `sg_without_vpc`,
-  `invalid_root_volume_type`, `invalid_ami`, `alb_tracking_without_label`,
-  `invalid_spot_percentage`, `user_data_conflict`.
-- **`tests/apply.tftest.hcl`** — `command = apply` against a mocked provider:
-  `full_apply` (spot mixed + IAM + SG + extra EBS + refresh + tracking + alarms)
-  and `on_demand_minimal_apply`.
-
-> **Scope of the mocks.** These prove schema, wiring, plan logic, and the
-> dynamic-block selection (on-demand vs mixed). They do **not** call the real
-> EC2/Auto Scaling APIs — a live `terraform apply` against a sandbox account is
-> the final gate.
+| Example | Shows |
+|---|---|
+| [`basic`](examples/basic) | The smallest call: two instances across two AZs from a pinned AMI |
+| [`complete`](examples/complete) | Every module-level input, as a web fleet behind an ALB: mixed on-demand and Spot, target tracking and predictive scaling, refresh checkpoints with alarm rollback, an initial launch hook and a draining hook |
+| [`ecs-capacity`](examples/ecs-capacity) | EC2 capacity for `modules/ecs`: attribute-based Spot with one on-demand instance, protected from scale-in, from the ECS-optimized image |
+
+## Most-used inputs
+
+The registry's Inputs tab is the reference; descriptions in `variables.tf` are
+written to be read there.
+
+| Name | Default | Notes |
+|---|---|---|
+| `name`, `subnet_ids`, `security_group_ids` | required | Up to 36 characters; two AZs or more; your groups |
+| `ami`, `ami_ssm_parameter` | `""` | Exactly one; pin `ami` for deliberate image changes |
+| `instance_type`, `instance_types`, `instance_requirements` | `t3.medium`, `[]`, off | One type, a list in preference order, or attribute-based selection |
+| `purchase_options` | all on-demand | On-demand base, percentage above it, Spot strategy |
+| `min_size`, `max_size`, `desired_capacity` | `1`, `3`, `-1` (min) | `max_size` is the ceiling of the bill |
+| `ignore_desired_capacity_changes` | `true` | `false`: Terraform owns the count |
+| `instance_profile` | created, with Session Manager | `create = false` with `name` to bring your own |
+| `kms_key_arn`, `service_linked_role_arn` | `""` | Customer key for every volume, and the role it must admit |
+| `root_volume`, `ebs_volumes` | 30 GiB gp3 | Always encrypted |
+| `instance_refresh` | on, rollback, skip matching | Checkpoints, alarm rollback, triggers |
+| `instance_maintenance_policy` | AWS default | `100`/`110` launches before it terminates |
+| `lifecycle_hooks`, `terminate_hook_abandon` | `{}`, `""` | Separate resources; `initial` for first-launch hooks |
+| `target_tracking_policies`, `predictive_scaling`, `scheduled_actions` | none | Predefined or customized metrics; forecast before scaling |
+| `sns_topic_arn`, `alarm_actions` | `""`, `[]` | Where failures and alarms go |
+| `acknowledged_checks` | `[]` | Advisory checks you have decided to live with |
+
+## Contract outputs
+
+| Output | For |
+|---|---|
+| `governance` | The posture as data: who owns the count, the instance mix, Spot share, AMI source, refresh settings, keys, SSH, public IP, hop limit, initial hooks, acknowledged checks |
+| `kms_key_policy_requirements` | Contract v2 entries: the service-linked role's use of and grants on the volume key, and the topic key's publishers. Feed them to `modules/kms` as a consumer |
+| `notification_requirements` | The topic policy statements the alarms and event rules need |
+| `deployer_requirements` | `ec2:RunInstances`, `ec2:CreateTags`, `iam:PassRole` on the instance role, and the service-linked role, as a policy known at plan |
+| `network_contract` | The Session Manager endpoints and the S3 gateway the instances need |
+| `verify_commands` | CloudShell checks: the group, its instances, failed launches, refresh status, a session on an instance, warm pool, forecast, retained instances |
+
+## Limits
+
+- **Never applied against real AWS in this repository.** Plans are tested
+  against a mocked provider on the newest aws 6.x, and one mocked apply proves
+  the resources assemble. AWS accepting the requests, the launch template
+  rendering without a diff, and the event patterns matching real events are
+  reasoned from documentation and provider source, not observed.
+- **aws 6.x only.** Workspaces on aws 5.x stay on asg-group 1.x.
+- **No security groups are created.** The group's instances use yours.
+- **No launch-time AMI resolution, step scaling, Classic Load Balancers, VPC
+  Lattice traffic sources, secondary network interfaces or ENA queue tuning.**
+- **The execution of user data is not checked.** A script that fails leaves
+  the instance InService unless the load balancer's health check catches it;
+  use `health_check_type = "ELB"` behind a load balancer.
+
+## Versioning and support
+
+Semantic versioning, tags `asg-group-vX.Y.Z`. Breaking: removed or renamed
+inputs and outputs, new required inputs, changed defaults, an update that
+becomes a replacement, an address change, a raised Terraform or provider
+floor. A deprecated input keeps working for at least one minor release before
+a major removes it. The previous major gets security fixes for six months after
+a new major. [CHANGELOG.md](CHANGELOG.md), [COSTS.md](COSTS.md),
+[docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md) for 1.x callers.

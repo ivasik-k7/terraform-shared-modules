@@ -1,8 +1,66 @@
-# Changelog
+# Changelog: asg-group
 
-All notable changes to the `asg-group` module are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com/) and the module follows
-[Semantic Versioning](https://semver.org/).
+All notable changes to this module. The format is
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows
+[semantic versioning](https://semver.org): see "Versioning and support" in
+[README.md](README.md). Releases are tagged `asg-group-vX.Y.Z`.
+
+Entries marked **BREAKING** change what an unchanged caller's plan does.
+
+## [2.0.0] - unreleased
+
+A rewrite to the repository's conventions. 1.x callers follow
+[docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md).
+
+### Added
+
+- Attribute-based instance type selection (`instance_requirements`), on-demand
+  allocation strategy, and an all-on-demand default for `purchase_options`.
+- `instance_maintenance_policy`, `availability_zone_distribution` (including
+  `reservations-then-balanced`), `max_instance_lifetime`,
+  `capacity_reservation`, `service_linked_role_arn`.
+- Instance refresh preferences: skip matching, auto rollback, checkpoints,
+  alarm rollback, triggers, protected and standby instance handling.
+- Warm pool instance reuse; lifecycle hooks as separate resources, with
+  `initial` for first-launch hooks; `terminate_hook_abandon` (retain or
+  terminate an instance whose drain hook abandons).
+- Customized-metric target tracking; predictive scaling.
+- Launch template: credit specification, auto recovery, bandwidth weighting,
+  nested virtualization, placement groups by ID, tags on network interfaces.
+- EventBridge rules for failed launches, failed terminations and failed or
+  rolled-back refreshes; `alarm_actions` defaulting to `sns_topic_arn`.
+- Contract outputs: `governance`, `kms_key_policy_requirements` (contract v2,
+  the Auto Scaling service-linked role), `notification_requirements`,
+  `deployer_requirements`, `network_contract`, `verify_commands`.
+- Eleven advisory checks and `acknowledged_checks`; `required_tag_keys`.
+- `aws_autoscaling_group.static` for a Terraform-owned instance count
+  (`ignore_desired_capacity_changes = false`).
+
+### Changed
+
+- **BREAKING** `hashicorp/aws` `>= 6.57.1, < 7.0.0` (was `>= 5.40.0, < 6.0.0`).
+- **BREAKING** Inputs reshaped to the repository's conventions: `""` and `-1`
+  mean unset instead of `null`; root volume settings are `root_volume`; extra
+  volumes are the map `ebs_volumes`; `spot` is `purchase_options`; the instance
+  role is `instance_profile`. The mapping is in the upgrade guide.
+- **BREAKING** Defaults: an instance role with Session Manager is created
+  (was none); instance refresh is on with rollback (was off); alarms are on
+  (was off); burstable fleets get standard CPU credits (was the AWS default,
+  unlimited); more group metrics are collected (free); every resource is
+  tagged `ManagedBy` and `Module`.
+- **BREAKING** Every volume is encrypted, and `kms_key_arn` applies to all of
+  them (`root_volume_encrypted` and per-volume keys are gone).
+- **BREAKING** `name` is 1-36 letters, digits and hyphens.
+
+### Removed
+
+- **BREAKING** Security group management (`create_security_group`, `vpc_id`,
+  `security_group_name`, `security_group_ingress_rules`,
+  `security_group_egress_rules`, outputs `security_group_id` and
+  `security_group_ids`); `security_group_ids` is now required.
+- **BREAKING** `availability_zones` (subnets are required), `default_cooldown`,
+  `metrics_granularity`, `min_elb_capacity`, `initial_lifecycle_hooks` (now
+  `lifecycle_hooks`).
 
 ## [1.0.0] - 2026-07-01
 
