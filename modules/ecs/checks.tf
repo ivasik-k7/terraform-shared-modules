@@ -53,7 +53,7 @@ check "services_survive_an_az" {
 check "spot_services_keep_an_on_demand_floor" {
   assert {
     condition     = !local.create ? true : (contains(local.acknowledged, "spot_services_keep_an_on_demand_floor") ? true : length(local.spot_without_floor) == 0)
-    error_message = "Services on Fargate Spot with no on-demand share: ${join(", ", local.spot_without_floor)}. When Spot has no capacity Fargate does not fall back to on-demand; the service waits with too few tasks. Use capacity = \"balanced\" for a base of one on-demand task. ${local.ack_hint}"
+    error_message = "Services on Spot (Fargate Spot, or a SPOT Managed Instances provider) with no on-demand share: ${join(", ", local.spot_without_floor)}. When Spot has no capacity ECS does not fall back to on-demand; the service waits with too few tasks. On Fargate, capacity = \"balanced\" keeps a base of one on-demand task; on Managed Instances, give an ON_DEMAND provider a base in capacity_provider_strategy. ${local.ack_hint}"
   }
 }
 
@@ -112,5 +112,12 @@ check "secrets_are_not_in_environment" {
   assert {
     condition     = !local.create ? true : (contains(local.acknowledged, "secrets_are_not_in_environment") ? true : length(local.secret_looking_environment) == 0)
     error_message = "Environment variables named like secrets: ${join(", ", local.secret_looking_environment)}. Plain environment values are in state, in the plan, and readable by anyone with ecs:DescribeTaskDefinition; use secrets. ${local.ack_hint}"
+  }
+}
+
+check "managed_instance_volumes_are_encrypted" {
+  assert {
+    condition     = !local.create ? true : (contains(local.acknowledged, "managed_instance_volumes_are_encrypted") ? true : local.managed_instance_volumes_encrypted)
+    error_message = "EBS encryption by default is off in this account and region, so the data volumes of the Managed Instances (${join(", ", keys(local.managed_instances))}) are created unencrypted: the capacity provider has no encryption setting of its own. Turn it on for the region (aws ec2 enable-ebs-encryption-by-default). ${local.ack_hint}"
   }
 }

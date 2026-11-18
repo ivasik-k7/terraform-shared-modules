@@ -6,9 +6,11 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # The floor is the 5.x release CI tests. Arguments only 6.x has (native
-      # blue/green, sigint_rollback, S3 Files volumes) are not used.
-      version = ">= 5.100.0, < 7.0.0"
+      # Native blue/green, linear and canary deployments (6.21.0), sigint_rollback
+      # (6.11.0), Service Connect access logs (6.34.0) and Managed Instances
+      # capacity providers (6.15.0) are older than this floor.
+      # https://github.com/hashicorp/terraform-provider-aws/blob/v6.57.1/CHANGELOG.md
+      version = ">= 6.57.1, < 7.0.0"
     }
   }
 }

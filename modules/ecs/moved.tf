@@ -23,3 +23,10 @@ moved {
   from = aws_ecs_service.static
   to   = aws_ecs_service.this
 }
+
+# The infrastructure role's policy attachment on main before 3.0.0 was tagged,
+# when it had only the volumes policy.
+moved {
+  from = aws_iam_role_policy_attachment.infrastructure[0]
+  to   = aws_iam_role_policy_attachment.infrastructure["volumes"]
+}

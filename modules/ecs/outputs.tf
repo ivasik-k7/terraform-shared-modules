@@ -13,8 +13,8 @@ output "cluster_arn" {
 }
 
 output "capacity_provider_names" {
-  description = "Registered name of each ec2_capacity_providers entry, by key."
-  value       = { for k, p in aws_ecs_capacity_provider.ec2 : k => p.name }
+  description = "Registered name of each ec2_capacity_providers and managed_instances_capacity_providers entry, by key."
+  value       = merge({ for k, p in aws_ecs_capacity_provider.ec2 : k => p.name }, { for k, p in aws_ecs_capacity_provider.managed_instances : k => p.name })
 }
 
 output "service_arns" {
@@ -76,8 +76,13 @@ output "schedule_arns" {
 }
 
 output "infrastructure_role_arn" {
-  description = "The role ECS manages EBS volumes with. Null when no service has managed_ebs_volume."
-  value       = length(local.ebs_services) > 0 ? local.infrastructure_arn : null
+  description = "The role ECS acts on infrastructure with: managed EBS volumes, load balancer rules during BLUE_GREEN, LINEAR and CANARY deployments, deployment lifecycle hooks, Managed Instances. Null when nothing uses it."
+  value       = local.create && local.infrastructure_used ? local.infrastructure_arn : null
+}
+
+output "managed_instances_instance_profile_arn" {
+  description = "The instance profile the module created for Managed Instances (role ecsInstanceRole-<name>). Null when every provider names its own."
+  value       = one(aws_iam_instance_profile.instance[*].arn)
 }
 
 # ---------------------------------------------------------------------------
@@ -87,40 +92,47 @@ output "infrastructure_role_arn" {
 output "governance" {
   description = "The posture of this cluster as data: assert on it in tests, diff it in a change review."
   value = !local.create ? null : {
-    workloads                  = { for k, s in local.services : k => s.workload }
-    capacity                   = local.strategy
-    services_on_spot           = sort([for k, w in local.spot_weight : k if w > 0])
-    services_without_rollback  = local.services_without_rollback
-    single_task_services       = local.single_task_services
-    spot_without_on_demand     = local.spot_without_floor
-    az_rebalancing             = local.services_with_az_rebalancing
-    autoscaled                 = sort(keys(local.autoscaled))
-    scheduled                  = { for k, s in local.scheduled : k => "${s.schedule.expression} ${s.schedule.timezone}" }
-    unpinned_images            = local.unpinned_images
-    externally_deployed        = local.externally_deployed
-    service_discovery          = { for k, s in local.long_running : k => "${s.service_discovery.namespace_id != "" ? "created" : "existing"} ${s.service_discovery.dns_record_type}" if s.service_discovery != null }
-    log_groups_not_managed     = sort([for k, s in local.services : k if !s.log_group.create])
-    log_retention_by_workload  = local.log_retention
-    mutable_tag_images         = local.mutable_tag_images
-    external_registries        = local.external_registries
-    host_access                = local.host_access
-    administrator_roles        = local.administrator_roles
-    secret_looking_environment = local.secret_looking_environment
-    exec_logging               = length(local.exec_services) == 0 ? "no exec" : var.execute_command.logging
-    writable_root_filesystems  = local.writable_root_containers
-    shell_access               = local.services_with_shell_access
-    public_ip                  = local.services_with_public_ip
-    untagged_tasks             = local.untagged_task_services
-    schedules_without_dlq      = local.schedules_without_dlq
-    container_insights         = var.container_insights
-    log_retention_days         = var.log_retention_days
-    log_keys_by_workload       = { for k, key in local.log_key : k => key != "" ? key : "CloudWatch Logs' own encryption" }
-    ephemeral_customer_key     = var.fargate_ephemeral_storage_kms_key_arn != ""
-    notifications              = var.sns_topic_arn != ""
-    alarms                     = sort(keys(local.alarmed))
-    event_rules                = sort(keys(local.event_rules))
-    required_tag_keys          = sort(var.required_tag_keys)
-    acknowledged_checks        = sort(var.acknowledged_checks)
+    workloads                   = { for k, s in local.services : k => s.workload }
+    capacity                    = local.strategy
+    services_on_spot            = sort([for k, w in local.spot_weight : k if w > 0])
+    services_without_rollback   = local.services_without_rollback
+    single_task_services        = local.single_task_services
+    spot_without_on_demand      = local.spot_without_floor
+    az_rebalancing              = local.services_with_az_rebalancing
+    deployment_strategies       = local.deployment_strategies
+    traffic_shifted             = sort(keys(local.traffic_shifted))
+    lifecycle_hooks             = { for k, s in local.hooked : k => { for n, h in s.deployment.lifecycle_hooks : n => h.stages } }
+    sigint_rollback             = sort([for k, s in local.replica : k if s.deployment.sigint_rollback])
+    service_connect_access_logs = local.access_logged
+    managed_instances           = { for k, p in local.managed_instances : k => p.capacity_option_type }
+    managed_instance_volumes    = length(local.managed_instances) == 0 ? "no managed instances" : (local.managed_instance_volumes_encrypted ? "EBS encryption by default" : "unencrypted")
+    autoscaled                  = sort(keys(local.autoscaled))
+    scheduled                   = { for k, s in local.scheduled : k => "${s.schedule.expression} ${s.schedule.timezone}" }
+    unpinned_images             = local.unpinned_images
+    externally_deployed         = local.externally_deployed
+    service_discovery           = { for k, s in local.long_running : k => "${s.service_discovery.namespace_id != "" ? "created" : "existing"} ${s.service_discovery.dns_record_type}" if s.service_discovery != null }
+    log_groups_not_managed      = sort([for k, s in local.services : k if !s.log_group.create])
+    log_retention_by_workload   = local.log_retention
+    mutable_tag_images          = local.mutable_tag_images
+    external_registries         = local.external_registries
+    host_access                 = local.host_access
+    administrator_roles         = local.administrator_roles
+    secret_looking_environment  = local.secret_looking_environment
+    exec_logging                = length(local.exec_services) == 0 ? "no exec" : var.execute_command.logging
+    writable_root_filesystems   = local.writable_root_containers
+    shell_access                = local.services_with_shell_access
+    public_ip                   = local.services_with_public_ip
+    untagged_tasks              = local.untagged_task_services
+    schedules_without_dlq       = local.schedules_without_dlq
+    container_insights          = var.container_insights
+    log_retention_days          = var.log_retention_days
+    log_keys_by_workload        = { for k, key in local.log_key : k => key != "" ? key : "CloudWatch Logs' own encryption" }
+    ephemeral_customer_key      = var.fargate_ephemeral_storage_kms_key_arn != ""
+    notifications               = var.sns_topic_arn != ""
+    alarms                      = sort(keys(local.alarmed))
+    event_rules                 = sort(keys(local.event_rules))
+    required_tag_keys           = sort(var.required_tag_keys)
+    acknowledged_checks         = sort(var.acknowledged_checks)
   }
 }
 
@@ -139,6 +151,10 @@ output "network_contract" {
       security_group_ids = local.security_groups[k]
       public_ip          = s.assign_public_ip
     } if s.network_mode == "awsvpc" }
+    managed_instances = { for k, p in local.managed_instances : k => {
+      subnet_ids         = length(p.subnet_ids) > 0 ? p.subnet_ids : var.subnet_ids
+      security_group_ids = length(p.security_group_ids) > 0 ? p.security_group_ids : var.security_group_ids
+    } }
 
     required_interface_endpoints = sort(distinct(concat(
       ["com.amazonaws.${local.region}.logs"],
@@ -147,7 +163,7 @@ output "network_contract" {
       anytrue([for k, refs in local.secret_refs : anytrue([for v in refs : strcontains(v, ":ssm:")])]) ? ["com.amazonaws.${local.region}.ssm"] : [],
       length(local.exec_services) > 0 && var.execute_command.kms_key_arn != "" ? ["com.amazonaws.${local.region}.kms"] : [],
       length(local.exec_services) > 0 ? ["com.amazonaws.${local.region}.ssmmessages"] : [],
-      length(local.ec2_workloads) > 0 ? ["com.amazonaws.${local.region}.ecs", "com.amazonaws.${local.region}.ecs-agent", "com.amazonaws.${local.region}.ecs-telemetry"] : [],
+      local.container_instances ? ["com.amazonaws.${local.region}.ecs", "com.amazonaws.${local.region}.ecs-agent", "com.amazonaws.${local.region}.ecs-telemetry"] : [],
       length([for k, s in local.long_running : k if s.service_connect != null]) > 0 ? ["com.amazonaws.${local.region}.ecs-agent"] : [],
     )))
     gateway_endpoints = length(local.ecr_images) + length(flatten(values(local.environment_file_arns))) > 0 || var.execute_command.s3_bucket_name != "" ? ["com.amazonaws.${local.region}.s3"] : []
@@ -162,7 +178,7 @@ output "network_contract" {
       "Interface endpoints need private DNS enabled, or tasks resolve the public names and hang until they time out.",
       "The endpoints' own security groups must allow 443 inbound from the task security groups.",
       "ECR stores image layers in S3: without the s3 gateway endpoint (or another S3 path), the pull fails after authentication succeeds.",
-      "Fargate tasks need no ecs endpoints, except ecs-agent, which Service Connect's proxy is managed through; EC2 container instances need ecs, ecs-agent and ecs-telemetry (https://docs.aws.amazon.com/AmazonECS/latest/developerguide/vpc-endpoints.html).",
+      "Fargate tasks need no ecs endpoints, except ecs-agent, which Service Connect's proxy is managed through; EC2 container instances and Managed Instances run the ECS agent and need ecs, ecs-agent and ecs-telemetry (https://docs.aws.amazon.com/AmazonECS/latest/developerguide/vpc-endpoints.html).",
       "Load balancer health checks arrive from the load balancer's subnets: the task security groups must allow the container port from the load balancer's security group.",
       length(local.imds_reachable_workloads) == 0 ? "" : "EC2 workloads in bridge or host network mode (${join(", ", local.imds_reachable_workloads)}) can reach the instance metadata service and the container instance role's credentials unless the instances block it (ECS_AWSVPC_BLOCK_IMDS, or the iptables rule in https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html).",
     ])
@@ -382,7 +398,7 @@ output "notification_requirements" {
 }
 
 output "deployer_requirements" {
-  description = "IAM the principal running Terraform needs besides managing the module's resources: iam:PassRole on the roles the module hands to ECS and EventBridge Scheduler, and the ECS and (with autoscaling) Application Auto Scaling service-linked roles, which AWS creates on first use. Attach iam_policy to the HCP Terraform apply role."
+  description = "IAM the principal running Terraform needs besides managing the module's resources: iam:PassRole on the roles the module hands to ECS and EventBridge Scheduler, iam:GetInstanceProfile to read supplied Managed Instances profiles at plan, and the ECS and (with autoscaling) Application Auto Scaling service-linked roles, which AWS creates on first use. Attach iam_policy to the HCP Terraform plan and apply roles."
   value = !local.create ? null : {
     iam_policy = jsonencode({
       Version = "2012-10-17"
@@ -394,12 +410,24 @@ output "deployer_requirements" {
           Resource  = sort(distinct(concat(values(local.task_role_arn), values(local.execution_role_arn))))
           Condition = { StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" } }
         }],
-        length(local.ebs_services) == 0 ? [] : [{
+        !local.infrastructure_used ? [] : [{
           Sid       = "PassInfrastructureRole"
           Effect    = "Allow"
           Action    = "iam:PassRole"
           Resource  = local.infrastructure_arn
           Condition = { StringEquals = { "iam:PassedToService" = "ecs.amazonaws.com" } }
+        }],
+        length(local.managed_instances) == 0 ? [] : [{
+          Sid      = "PassManagedInstanceRoles"
+          Effect   = "Allow"
+          Action   = "iam:PassRole"
+          Resource = concat(local.create_instance_profile ? [local.instance_role_arn] : [], [for k, d in data.aws_iam_instance_profile.managed_instances : d.role_arn])
+        }],
+        length(local.supplied_instance_profile) == 0 ? [] : [{
+          Sid      = "ReadSuppliedInstanceProfiles"
+          Effect   = "Allow"
+          Action   = "iam:GetInstanceProfile"
+          Resource = [for k, p in local.supplied_instance_profile : local.managed_instances[k].instance_profile_arn]
         }],
         length(local.scheduled) == 0 ? [] : [{
           Sid       = "PassSchedulerRole"
@@ -481,15 +509,18 @@ output "run_task_requirements" {
 output "verify_commands" {
   description = "Copy-paste checks for CloudShell after an apply, in the order you will need them. Maps are keyed by workload."
   value = !local.create ? null : {
-    services      = length(local.long_running) == 0 ? "" : "aws ecs describe-services --cluster ${var.name} --services ${join(" ", sort(keys(local.long_running)))} --query 'services[].[serviceName,status,runningCount,desiredCount,deployments[0].rolloutState,deployments[0].rolloutStateReason]' --output table"
-    events        = { for k, s in local.long_running : k => "aws ecs describe-services --cluster ${var.name} --services ${k} --query 'services[0].events[:10].[createdAt,message]' --output table" }
-    stopped_tasks = { for k, s in local.services : k => "aws ecs describe-tasks --cluster ${var.name} --tasks $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --desired-status STOPPED --query 'taskArns[:20]' --output text) --query 'tasks[].[stoppedAt,stopCode,stoppedReason,containers[0].exitCode]' --output table" }
-    logs          = { for k, s in local.services : k => "aws logs tail ${local.log_group_name[k]} --since 1h --follow" }
-    shell         = { for k, s in local.exec_services : k => "aws ecs execute-command --cluster ${var.name} --task $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --query 'taskArns[0]' --output text) --container ${contains(keys(local.containers[k]), k) ? k : [for n, c in local.containers[k] : n if c.essential][0]} --interactive --command /bin/sh" }
-    roll_back     = { for k, s in local.long_running : k => "aws ecs list-task-definitions --family-prefix ${var.name}-${k} --sort DESC --max-items 5 --output table && echo 'then: aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k}:<revision>${s.deployment.ignore_task_definition_changes ? " - Terraform leaves it there; the next pipeline deploy moves it on" : " - and set the same image in Terraform, or the next apply rolls it forward again"}'" }
-    deploy_latest = { for k in local.externally_deployed : k => "aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k} --query 'service.deployments[0].[taskDefinition,rolloutState]' --output text" }
-    schedules     = { for k, s in local.scheduled : k => "aws scheduler get-schedule --group-name ${var.name} --name ${k} --query '[State,ScheduleExpression,ScheduleExpressionTimezone,Target.RetryPolicy]' --output table" }
-    capacity      = "aws ecs describe-clusters --clusters ${var.name} --include STATISTICS --query 'clusters[0].[capacityProviders,defaultCapacityProviderStrategy,runningTasksCount,pendingTasksCount]' --output json"
-    exec_ready    = { for k, s in local.exec_services : k => "aws ecs describe-tasks --cluster ${var.name} --tasks $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --query 'taskArns[0]' --output text) --query 'tasks[0].containers[].managedAgents[].[name,lastStatus]' --output table" }
+    services          = length(local.long_running) == 0 ? "" : "aws ecs describe-services --cluster ${var.name} --services ${join(" ", sort(keys(local.long_running)))} --query 'services[].[serviceName,status,runningCount,desiredCount,deployments[0].rolloutState,deployments[0].rolloutStateReason]' --output table"
+    events            = { for k, s in local.long_running : k => "aws ecs describe-services --cluster ${var.name} --services ${k} --query 'services[0].events[:10].[createdAt,message]' --output table" }
+    stopped_tasks     = { for k, s in local.services : k => "aws ecs describe-tasks --cluster ${var.name} --tasks $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --desired-status STOPPED --query 'taskArns[:20]' --output text) --query 'tasks[].[stoppedAt,stopCode,stoppedReason,containers[0].exitCode]' --output table" }
+    logs              = { for k, s in local.services : k => "aws logs tail ${local.log_group_name[k]} --since 1h --follow" }
+    shell             = { for k, s in local.exec_services : k => "aws ecs execute-command --cluster ${var.name} --task $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --query 'taskArns[0]' --output text) --container ${contains(keys(local.containers[k]), k) ? k : [for n, c in local.containers[k] : n if c.essential][0]} --interactive --command /bin/sh" }
+    roll_back         = { for k, s in local.long_running : k => "aws ecs list-task-definitions --family-prefix ${var.name}-${k} --sort DESC --max-items 5 --output table && echo 'then: aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k}:<revision>${s.deployment.ignore_task_definition_changes ? " - Terraform leaves it there; the next pipeline deploy moves it on" : " - and set the same image in Terraform, or the next apply rolls it forward again"}'" }
+    deploy_latest     = { for k in local.externally_deployed : k => "aws ecs update-service --cluster ${var.name} --service ${k} --task-definition ${var.name}-${k} --query 'service.deployments[0].[taskDefinition,rolloutState]' --output text" }
+    schedules         = { for k, s in local.scheduled : k => "aws scheduler get-schedule --group-name ${var.name} --name ${k} --query '[State,ScheduleExpression,ScheduleExpressionTimezone,Target.RetryPolicy]' --output table" }
+    capacity          = "aws ecs describe-clusters --clusters ${var.name} --include STATISTICS --query 'clusters[0].[capacityProviders,defaultCapacityProviderStrategy,runningTasksCount,pendingTasksCount]' --output json"
+    exec_ready        = { for k, s in local.exec_services : k => "aws ecs describe-tasks --cluster ${var.name} --tasks $(aws ecs list-tasks --cluster ${var.name} --family ${var.name}-${k} --query 'taskArns[0]' --output text) --query 'tasks[0].containers[].managedAgents[].[name,lastStatus]' --output table" }
+    deployments       = { for k, s in local.replica : k => "aws ecs list-service-deployments --cluster ${var.name} --service ${k} --query 'serviceDeployments[:5].[serviceDeploymentArn,status,targetServiceRevisionArn]' --output table" }
+    stop_deployment   = { for k, s in local.replica : k => "aws ecs stop-service-deployment --stop-type ROLLBACK --service-deployment-arn $(aws ecs list-service-deployments --cluster ${var.name} --service ${k} --status IN_PROGRESS --query 'serviceDeployments[0].serviceDeploymentArn' --output text)" if s.deployment.strategy != "ROLLING" }
+    managed_instances = length(local.managed_instances) == 0 ? "" : "aws ecs describe-capacity-providers --capacity-providers ${join(" ", [for k, p in local.managed_instances : local.mi_provider_name[k]])} --query 'capacityProviders[].[name,status,updateStatus,updateStatusReason]' --output table"
   }
 }

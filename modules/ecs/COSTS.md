@@ -2,10 +2,12 @@
 
 **Region:** `eu-west-2` — EU (London)
 **Currency:** USD, on-demand list price, no Savings Plans or EDP discount
-**Pricing date:** Fargate and CloudWatch rates pulled from the **AWS Price List
-bulk API** on **2026-11-16** (`AmazonECS` offer published 2026-11-11,
-`AmazonCloudWatch` offer published 2026-11-04). Rates marked *not pulled* were
-not in those offers.
+**Pricing date:** Fargate, Managed Instances management and CloudWatch rates
+pulled from the **AWS Price List bulk API** on **2026-11-16** (`AmazonECS`
+offer published 2026-11-11, `AmazonCloudWatch` offer published 2026-11-04);
+EC2 instance and EBS rates on **2026-11-17** (`AmazonEC2` offer published
+2026-11-14, the figures in `modules/asg-group/COSTS.md`). Rates marked *not
+pulled* were not in those offers.
 **Basis:** `terraform-aws-ecs` 3.0.0 (unreleased), module defaults
 (`container_insights = "enabled"`, `log_retention_days = 30`, alarms on).
 730 hours per month.
@@ -23,7 +25,9 @@ runs are the bill; the logs they write are the line that grows.
 | Line | Who is billed | Scales with | Bounded by default |
 |---|---|---|---|
 | Fargate tasks | The workload's account | vCPU and GB per task, per hour running | By `desired_count` / `autoscaling.max` |
-| CloudWatch Logs ingestion | Same | GB written by containers and the Service Connect proxy | No: it is what the application writes |
+| Managed Instances | Same | Instance-hours, plus a management fee of 12% of the instance's on-demand rate, plus each instance's data volume | By the tasks placed; ECS consolidates idle instances unless `scale_in_after_seconds = -1` |
+| Second revision during a deployment | Same | Tasks × bake time, on `BLUE_GREEN`, `LINEAR` and `CANARY` services | By `bake_time_minutes` |
+| CloudWatch Logs ingestion | Same | GB written by containers and the Service Connect proxy, plus a line per request with `access_logs` | No: it is what the application and its traffic write |
 | **CloudWatch Logs storage** | Same | GB kept | **Yes: 30 days. `0` keeps everything forever** |
 | Container Insights | Same | Metrics per cluster, service and task; performance log events | Turned off with `container_insights = "disabled"` |
 | Alarms | Same | 2-3 per service | $0.10 each per month |
@@ -61,7 +65,46 @@ task costs.
    your bill (*not pulled*).
 4. Right-sizing `memory`: at 1 vCPU, each GB above 2 adds $3.73/month per task.
 
-## 3. Logs — the line that grows
+## 3. Managed Instances
+
+You pay for the whole instance, whatever runs on it, plus a **management fee**
+per instance-hour. In this offer the fee is **12% of the instance's on-demand
+rate** for every type below (fee ÷ rate).
+
+| Type | Instance per hour | Management per hour | Per month (both) | Fee alone per month |
+|---|---:|---:|---:|---:|
+| t3.medium | $0.0472 | $0.005664 | (0.0472 + 0.005664) × 730 = $38.59 | $4.13 |
+| m7g.large (Graviton) | $0.0944 | $0.011328 | $77.18 | $8.27 |
+| m7i.large | $0.11655 | $0.013992 | $95.30 | $10.21 |
+| m7i.xlarge | $0.2331 | $0.027972 | $190.58 | $20.42 |
+
+Each instance also has a data volume, 80 GiB unless `storage_size_gib` says
+otherwise: 80 × $0.0928 = $7.42 per instance-month if it is gp3 (the ECS
+documentation does not name the volume type). Spot instances
+(`capacity_option_type = "SPOT"`) are billed at the Spot price; whether the fee
+follows the Spot or the on-demand rate is *not pulled*.
+
+**Against Fargate, fully packed.** Two tasks of 1 vCPU / 4 GB fill an
+m7i.large: $95.30 a month on Managed Instances, 2 × (0.04656 + 4 × 0.00511) ×
+730 = $97.82 on Fargate. On ARM, an m7g.large is $77.18 against $78.27. At full
+packing, before the data volume, the two are within 3%; with an 80 GiB gp3
+volume Managed Instances cost more ($102.72 against $97.82, $84.60 against
+$78.27 on ARM), and more again for every hour an instance runs part-empty. Choose them for what Fargate does not offer (GPUs,
+instance families, network performance, privileged capabilities), not for
+price.
+
+## 4. Deployments that run two revisions
+
+`BLUE_GREEN`, `LINEAR` and `CANARY` run the new revision beside the old one,
+and keep both for `bake_time_minutes` after the traffic has moved. A service of
+four 1 vCPU / 2 GB Fargate tasks with the default 10-minute bake pays
+4 × $0.05678 × 10 / 60 = **$0.038 a deployment** for the second revision,
+plus the time traffic takes to shift (`canary_bake_minutes`, or
+`linear_step_bake_minutes` per step); 30 deployments a month add $1.14. On EC2
+or Managed Instances capacity the cluster must also have room for both
+revisions, so instances scale out for the deployment.
+
+## 5. Logs — the line that grows
 
 Ingestion **$0.5985 per GB** (Standard class), storage **$0.0315 per GB-month**.
 Storage is billed on the compressed size, so the figures below, which use the
@@ -81,7 +124,12 @@ $3,231.90 ingested, and keeps growing. The `log_retention_is_bounded` check warn
 the usual reason ingestion doubles; the line is per GB, so it is visible within
 a day in Cost Explorer under `DataProcessing-Bytes`.
 
-## 4. Signals
+**Service Connect access logs** add a line per request. At 100 requests a
+second and 400 bytes a line, that is 100 × 400 × 3,600 × 730 = 105.12 GB a
+month: 105.12 × $0.5985 = **$62.91 a month** of ingestion, and $3.31 of storage
+at 30-day retention. The line scales with traffic, not with the module.
+
+## 6. Signals
 
 | Item | Rate | Typical |
 |---|---|---|
@@ -91,7 +139,7 @@ a day in Cost Explorer under `DataProcessing-Bytes`.
 | EventBridge Scheduler invocations | *not pulled* | One per schedule run |
 | SNS deliveries | The topic owner's | — |
 
-## 5. What the caller's network spends
+## 7. What the caller's network spends
 
 The tasks need VPC endpoints in subnets without a NAT path
 (`output.network_contract`): typically `ecr.api`, `ecr.dkr`, `logs`, plus
@@ -100,9 +148,12 @@ endpoints are billed per endpoint, per AZ, per hour, plus per GB processed, to
 the account that owns them (*not pulled*). The S3 gateway endpoint ECR needs is
 free. One set of endpoints shared by every cluster in a VPC is the cheap shape.
 
-## 6. Checking the bill
+## 8. Checking the bill
 
 - Cost Explorer, grouped by the `aws:ecs:serviceName` tag (activate it as a
   cost allocation tag; the module turns on ECS managed tags) and by your own
   `required_tag_keys`.
 - `verify_commands.capacity` shows running and pending tasks per cluster.
+- Managed Instances carry the module's tags (`propagate_tags =
+  "CAPACITY_PROVIDER"`), so they group with the cluster's other lines; the
+  management fee is under the `ECS-Managed-Instances` usage type.

@@ -6,10 +6,13 @@ mock_provider "aws" {
     defaults = { partition = "aws" }
   }
   mock_data "aws_region" {
-    defaults = { endpoint = "ec2.eu-west-2.amazonaws.com" }
+    defaults = { region = "eu-west-2" }
   }
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
+  }
+  mock_data "aws_ebs_encryption_by_default" {
+    defaults = { enabled = true }
   }
 }
 
@@ -39,7 +42,12 @@ run "complete_plans_with_every_contract" {
   }
 
   assert {
-    condition     = module.ecs.governance.workloads == { api = "service", worker = "service", reconcile = "scheduled", migrate = "task", search = "service", shipper = "daemon" }
+    condition     = module.ecs.governance.workloads == { api = "service", worker = "service", reconcile = "scheduled", migrate = "task", search = "service", renderer = "service", shipper = "daemon" }
     error_message = "the complete example covers every workload kind."
+  }
+
+  assert {
+    condition     = module.ecs.governance.deployment_strategies.api == "CANARY" && module.ecs.governance.managed_instances == { compute = "ON_DEMAND" }
+    error_message = "the complete example shows a canary release and a Managed Instances provider."
   }
 }

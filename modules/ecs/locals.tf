@@ -10,7 +10,7 @@ locals {
 
   # Placeholders so ARN strings still build when create = false.
   partition  = coalesce(one(data.aws_partition.current[*].partition), "aws")
-  region     = try(split(".", one(data.aws_region.current[*].endpoint))[1], "us-east-1")
+  region     = coalesce(one(data.aws_region.current[*].region), "us-east-1")
   account_id = coalesce(one(data.aws_caller_identity.current[*].account_id), "000000000000")
 
   acknowledged = toset(var.acknowledged_checks)
@@ -64,10 +64,12 @@ locals {
   }
 
   ec2_provider_name = { for k, p in var.ec2_capacity_providers : k => "${var.name}-${k}" }
+  mi_provider_name  = { for k, p in var.managed_instances_capacity_providers : k => "${var.name}-${k}" }
+  provider_name     = merge(local.ec2_provider_name, local.mi_provider_name)
 
   default_is_preset = contains(keys(local.capacity_presets), var.default_capacity)
   cluster_default_strategy = local.default_is_preset ? local.capacity_presets[var.default_capacity] : [
-    { capacity_provider = lookup(local.ec2_provider_name, var.default_capacity, var.default_capacity), weight = 1, base = 0 }
+    { capacity_provider = lookup(local.provider_name, var.default_capacity, var.default_capacity), weight = 1, base = 0 }
   ]
   fargate_default_strategy = local.default_is_preset ? local.capacity_presets[var.default_capacity] : local.capacity_presets.on_demand
 
@@ -77,24 +79,35 @@ locals {
     s.workload == "daemon" ? [] : (
       length(s.capacity_provider_strategy) > 0 ? [
         for p in s.capacity_provider_strategy : {
-          capacity_provider = s.launch == "FARGATE" ? p.capacity_provider : lookup(local.ec2_provider_name, p.capacity_provider, p.capacity_provider)
+          capacity_provider = s.launch == "FARGATE" ? p.capacity_provider : lookup(local.provider_name, p.capacity_provider, p.capacity_provider)
           weight            = p.weight
           base              = p.base
         }
         ] : (
         s.capacity == "" ? local.fargate_default_strategy : (
           s.launch == "FARGATE" ? local.capacity_presets[s.capacity] : [
-            { capacity_provider = lookup(local.ec2_provider_name, s.capacity, s.capacity), weight = 1, base = 0 }
+            { capacity_provider = lookup(local.provider_name, s.capacity, s.capacity), weight = 1, base = 0 }
           ]
         )
       )
     )
   ) }
 
-  spot_weight = { for k, st in local.strategy : k => sum(concat([0], [for p in st : p.weight if p.capacity_provider == "FARGATE_SPOT"])) }
+  spot_providers = concat(["FARGATE_SPOT"], [for k, p in var.managed_instances_capacity_providers : local.mi_provider_name[k] if p.capacity_option_type == "SPOT"])
+  spot_weight    = { for k, st in local.strategy : k => sum(concat([0], [for p in st : p.weight if contains(local.spot_providers, p.capacity_provider)])) }
   on_demand_floor = { for k, st in local.strategy : k => (
-    sum(concat([0], [for p in st : p.base if p.capacity_provider != "FARGATE_SPOT"])) > 0 ? true : sum(concat([0], [for p in st : p.weight if p.capacity_provider != "FARGATE_SPOT"])) > 0
+    sum(concat([0], [for p in st : p.base if !contains(local.spot_providers, p.capacity_provider)])) > 0 ? true : sum(concat([0], [for p in st : p.weight if !contains(local.spot_providers, p.capacity_provider)])) > 0
   ) }
+
+  # Managed Instances. The managed infrastructure policy passes only roles
+  # named ecsInstanceRole*; the module's own instance role is named so, and a
+  # supplied profile's role is granted by ARN instead.
+  # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-instances-instance-profile.html
+  managed_instances         = local.create ? var.managed_instances_capacity_providers : {}
+  create_instance_profile   = anytrue([for k, p in local.managed_instances : p.instance_profile_arn == ""])
+  supplied_instance_profile = { for k, p in local.managed_instances : k => element(split("/", p.instance_profile_arn), length(split("/", p.instance_profile_arn)) - 1) if p.instance_profile_arn != "" }
+  instance_role_name        = "ecsInstanceRole-${var.name}"
+  instance_role_arn         = "arn:${local.partition}:iam::${local.account_id}:role/${local.instance_role_name}"
 
   # ---------------------------------------------------------------------------
   # Containers
@@ -394,9 +407,23 @@ locals {
   ) }
   execution_module_policy = { for k, s in local.execution_roles_created : k => s if local.log_key[k] != "" ? true : length(local.secret_refs[k]) + length(flatten([for c in values(local.containers[k]) : c.environment_files])) > 0 }
 
-  ebs_services       = { for k, s in local.services : k => s if s.managed_ebs_volume != null }
-  infrastructure_arn = var.infrastructure_role.create ? "arn:${local.partition}:iam::${local.account_id}:role/${var.name}-ecs-infrastructure" : var.infrastructure_role.arn
-  create_infra_role  = var.infrastructure_role.create && length(local.ebs_services) > 0
+  # The infrastructure role carries only what the configuration uses.
+  # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/infrastructure_IAM_role.html
+  ebs_services    = { for k, s in local.services : k => s if s.managed_ebs_volume != null }
+  traffic_shifted = { for k, s in local.replica : k => s if s.deployment.strategy != "ROLLING" ? length(s.load_balancers) > 0 : false }
+  hooked          = { for k, s in local.replica : k => s if length(s.deployment.lifecycle_hooks) > 0 }
+  infrastructure_policies = merge(
+    length(local.ebs_services) > 0 ? { volumes = "arn:${local.partition}:iam::aws:policy/service-role/AmazonECSInfrastructureRolePolicyForVolumes" } : {},
+    length(local.traffic_shifted) > 0 ? { load_balancers = "arn:${local.partition}:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers" } : {},
+    length(local.managed_instances) > 0 ? { managed_instances = "arn:${local.partition}:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances" } : {},
+  )
+  infrastructure_used   = length(local.infrastructure_policies) + length(local.hooked) > 0
+  infrastructure_inline = length(local.hooked) + length(local.supplied_instance_profile) > 0
+  infrastructure_arn    = var.infrastructure_role.create ? "arn:${local.partition}:iam::${local.account_id}:role/${var.name}-ecs-infrastructure" : var.infrastructure_role.arn
+  create_infra_role     = var.infrastructure_role.create && local.infrastructure_used
+  # The resource reference orders ECS after the role and its policies.
+  infrastructure_role_in_use = local.create_infra_role ? aws_iam_role.infrastructure[0].arn : local.infrastructure_arn
+  hook_functions             = flatten([for k, s in local.hooked : [for h in values(s.deployment.lifecycle_hooks) : h.function_arn]])
 
   scheduler_role_arn = "arn:${local.partition}:iam::${local.account_id}:role/${var.name}-scheduler"
 
@@ -435,6 +462,9 @@ locals {
       container_port = lb.container_port > 0 ? lb.container_port : (
         length(s.containers) == 0 ? s.port : one([for p in s.containers[lb.container_name].port_mappings : p.container_port])
       )
+      alternate_target_group_arn   = lb.alternate_target_group_arn
+      production_listener_rule_arn = lb.production_listener_rule_arn
+      test_listener_rule_arn       = lb.test_listener_rule_arn
     }
   ] }
 
@@ -458,7 +488,7 @@ locals {
   service_connect_expose = { for k, s in local.long_running : k => (
     s.service_connect == null ? {} : (
       length(s.service_connect.expose) == 0 && length(s.containers) == 0 && s.port > 0
-      ? { (k) = { discovery_name = "", dns_name = "", port = 0, ingress_port_override = 0, idle_timeout_seconds = 0, per_request_timeout_seconds = 0 } }
+      ? { (k) = { discovery_name = "", dns_name = "", port = 0, ingress_port_override = 0, idle_timeout_seconds = 0, per_request_timeout_seconds = 0, test_traffic_header = null } }
       : s.service_connect.expose
     )
   ) }
@@ -547,6 +577,8 @@ locals {
   ]))
   efs_volumes   = flatten([for k, s in local.services : [for n, v in s.volumes : v.efs.file_system_id if v.efs != null]])
   ec2_workloads = [for k, s in local.services : k if s.launch == "EC2"]
+  # Container instances run the ECS agent, which needs the ecs endpoints.
+  container_instances = length(local.ec2_workloads) + length(local.managed_instances) > 0
   ebs_keys = distinct(concat(
     length(local.ebs_services) > 0 && var.managed_storage_kms_key_arn != "" ? [var.managed_storage_kms_key_arn] : [],
     [for k, s in local.ebs_services : s.managed_ebs_volume.kms_key_arn if s.managed_ebs_volume.kms_key_arn != ""],
@@ -587,4 +619,10 @@ locals {
   created_log_groups_without_key = [for k, s in local.created_log_groups : k if local.log_key[k] == ""]
 
   services_with_az_rebalancing = [for k, on in local.az_rebalancing : k if on]
+
+  deployment_strategies = { for k, s in local.replica : k => s.deployment.strategy }
+  access_logged         = sort([for k, s in local.long_running : k if s.service_connect != null ? s.service_connect.access_logs != null : false])
+  # Managed Instances data volumes follow the account's EBS encryption by default.
+  # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ManagedInstances.html
+  managed_instance_volumes_encrypted = length(local.managed_instances) == 0 ? true : one(data.aws_ebs_encryption_by_default.current[*].enabled) != false
 }

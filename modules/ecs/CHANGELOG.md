@@ -40,7 +40,9 @@ A rewrite. Callers of earlier versions follow
   `run_task_requirements`, `verify_commands`.
 - S3 grants scoped by `aws:ResourceAccount` (`trusted_s3_account_ids`); keys
   for environment files, ECS Exec transcripts and schedule dead-letter queues.
-- Fifteen advisory checks and `acknowledged_checks`.
+- Sixteen advisory checks and `acknowledged_checks`, including
+  `managed_instance_volumes_are_encrypted` (EBS encryption by default off
+  while Managed Instances exist).
 - `deployment.ignore_task_definition_changes`: an external pipeline owns the
   running revision (`aws_ecs_service.static_ignored` and
   `.autoscaled_ignored`, held identical to the other two by
@@ -52,11 +54,34 @@ A rewrite. Callers of earlier versions follow
   `alarm_period`, `alarm_evaluation_periods`, `alarms.min_running_tasks`.
 - `verify_commands.deploy_latest` for pipeline-owned services.
 - A `moved` block from `aws_ecs_service.static` to `.this`.
+- Native deployment strategies: `deployment.strategy` `BLUE_GREEN`, `LINEAR`
+  and `CANARY` with their bake times and shares; `load_balancers` take
+  `alternate_target_group_arn`, `production_listener_rule_arn` and
+  `test_listener_rule_arn`; `deployment.lifecycle_hooks` invoke Lambda
+  functions; `deployment.sigint_rollback` rolls back a cancelled run.
+  Every service sends its strategy, `ROLLING` included.
+- Service Connect `access_logs` and per-port `test_traffic_header`.
+- `managed_instances_capacity_providers` and `launch = "MANAGED_INSTANCES"`:
+  ECS Managed Instances on the cluster, with the instance role
+  `ecsInstanceRole-<name>` and its profile, or a supplied profile whose role
+  the infrastructure role may pass by ARN. Instance requirements take the same
+  fields as `modules/asg-group`, plus accelerators.
+- The infrastructure role carries one managed policy per use (volumes, load
+  balancers, Managed Instances) and `lambda:InvokeFunction` on the hook
+  functions; `output.infrastructure_role_arn` is set whenever it is used.
+- `output.managed_instances_instance_profile_arn`;
+  `verify_commands.deployments`, `.stop_deployment` and `.managed_instances`;
+  `governance` reports strategies, hooks, traffic-shifted services,
+  `sigint_rollback`, access logs and Managed Instances.
+- A refusal of a cluster `name` starting with `aws`, `ecs` or `fargate` when
+  the module registers capacity providers (`CreateCapacityProvider` refuses
+  those prefixes).
 
 ### Changed
 
 - **BREAKING** Terraform `>= 1.9.0` (was `>= 1.3.0`), `hashicorp/aws`
-  `>= 5.100.0, < 7.0.0` (was `>= 5.0`, unbounded).
+  `>= 6.57.1, < 7.0.0` (was `>= 5.0`, unbounded), the floor
+  `modules/asg-group` 2.0 uses.
 - **BREAKING** `cluster_name` is now `name`; families are `<name>-<key>`
   instead of `task_definition_family`; roles are `<name>-<key>-task` and
   `<name>-<key>-exec`. Roles and task definitions are replaced on upgrade.
@@ -75,8 +100,6 @@ A rewrite. Callers of earlier versions follow
   file system policy that does not allow the task role then refuses the mount.
   Set `iam_authorization = false` to keep the old behaviour.
 - **BREAKING** Docker volumes default to `autoprovision = false` (was `true`).
-- **BREAKING** On aws 5.x, a service the old module created with
-  `launch_type` is replaced on upgrade; see the upgrade guide.
 
 ### Removed
 

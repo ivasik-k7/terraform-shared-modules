@@ -70,7 +70,7 @@ def check(mod: pathlib.Path) -> list[str]:
         if b is None:
             found.append(f"aws_ecs_service.{name} needs exactly one BEGIN SERVICE BODY / END SERVICE BODY pair")
             continue
-        if "lifecycle" in b:
+        if re.search(r"^\s*lifecycle\s*\{", b, re.M):
             found.append(f"the shared body of aws_ecs_service.{name} must not contain a lifecycle block")
         bodies[name] = b
         outside = re.sub(r"\s+", " ", block.replace(b, "").replace(END, "")).strip()
@@ -96,6 +96,7 @@ def self_test(mod: pathlib.Path) -> int:
         ("a lost ignore_changes", lambda t: t.replace("ignore_changes = [desired_count]", "ignore_changes = []", 1)),
         ("a pipeline-owned service that Terraform redeploys", lambda t: t.replace("ignore_changes = [task_definition]", "ignore_changes = []", 1)),
         ("a lifecycle on the static service", lambda t: t.replace('resource "aws_ecs_service" "this" {\n', 'resource "aws_ecs_service" "this" {\n  lifecycle {\n    ignore_changes = [tags]\n  }\n', 1)),
+        ("a lifecycle block inside every shared body", lambda t: t.replace("  # END SERVICE BODY\n", "  lifecycle {\n    ignore_changes = [tags]\n  }\n  # END SERVICE BODY\n")),
         ("a missing marker", lambda t: t.replace(BEGIN, "# BEGIN", 1)),
         ("an argument outside the markers", lambda t: t.replace("  for_each = local.autoscaled\n", "  for_each = local.autoscaled\n  triggers = { redeploy = timestamp() }\n", 1)),
     ]

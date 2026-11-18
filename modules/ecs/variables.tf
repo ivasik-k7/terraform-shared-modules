@@ -63,6 +63,7 @@ variable "acknowledged_checks" {
         "containers_stay_on_their_side",
         "roles_are_not_administrators",
         "secrets_are_not_in_environment",
+        "managed_instance_volumes_are_encrypted",
       ], c)
     ])
     error_message = "acknowledged_checks names a check that does not exist. The check names are the check blocks in checks.tf, listed in the README under \"Advisory checks\"."
@@ -214,7 +215,8 @@ variable "default_capacity" {
       balanced        FARGATE base 1, then 1:3 FARGATE:FARGATE_SPOT
       spot_preferred  1:4 FARGATE:FARGATE_SPOT, no base
       spot_only       FARGATE_SPOT only; tasks wait when Spot has no capacity
-    or the key of an ec2_capacity_providers entry, or a name in external_capacity_providers.
+    or the key of an ec2_capacity_providers or managed_instances_capacity_providers entry, or a name in
+    external_capacity_providers.
   EOT
   type        = string
   default     = "on_demand"
@@ -255,6 +257,12 @@ variable "ec2_capacity_providers" {
   }
 
   validation {
+    # https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateCapacityProvider.html
+    condition     = length(var.ec2_capacity_providers) == 0 ? true : !can(regex("^(aws|ecs|fargate)", var.name))
+    error_message = "Capacity providers are registered as <name>-<key>, and ECS refuses a capacity provider name that starts with aws, ecs or fargate. Choose a name that does not."
+  }
+
+  validation {
     condition     = alltrue([for k, p in var.ec2_capacity_providers : can(regex("^arn:aws[a-z-]*:autoscaling:[a-z0-9-]+:[0-9]{12}:autoScalingGroup:", p.auto_scaling_group_arn))])
     error_message = "ec2_capacity_providers[*].auto_scaling_group_arn must be an Auto Scaling group ARN."
   }
@@ -274,8 +282,98 @@ variable "ec2_capacity_providers" {
   }
 }
 
+variable "managed_instances_capacity_providers" {
+  description = <<-EOT
+    ECS Managed Instances capacity providers, keyed by a short name: AWS launches, patches and replaces the
+    instances (at most every 14 days), and services with launch = "MANAGED_INSTANCES" reference the key.
+    Registered as <name>-<key>, on this cluster only. You are billed for the whole EC2 instance plus a management
+    fee per instance-hour (COSTS.md).
+      subnet_ids, security_group_ids  where the instances run; empty: the module's
+      instance_profile_arn            empty: the module creates ecsInstanceRole-<name> and its profile
+      capacity_option_type            ON_DEMAND or SPOT; changing it replaces the capacity provider
+      storage_size_gib                the instance's data volume; 0: the ECS default, 80 GiB
+      monitoring                      BASIC or DETAILED (billed as CloudWatch metrics per instance)
+      scale_in_after_seconds          unset: ECS default; -1: never consolidate idle instances; 0-3600
+      instance_requirements           vcpu_min above 0 limits the instance types; unset, ECS picks
+                                      cost-optimized general-purpose types
+  EOT
+  type = map(object({
+    subnet_ids             = optional(list(string), [])
+    security_group_ids     = optional(list(string), [])
+    instance_profile_arn   = optional(string, "")
+    capacity_option_type   = optional(string, "ON_DEMAND")
+    storage_size_gib       = optional(number, 0)
+    monitoring             = optional(string, "BASIC")
+    scale_in_after_seconds = optional(number)
+    instance_requirements = optional(object({
+      vcpu_min                                         = optional(number, 0)
+      vcpu_max                                         = optional(number, -1)
+      memory_mib_min                                   = optional(number, 0)
+      memory_mib_max                                   = optional(number, -1)
+      cpu_manufacturers                                = optional(list(string), [])
+      instance_generations                             = optional(list(string), ["current"])
+      burstable_performance                            = optional(string, "excluded")
+      bare_metal                                       = optional(string, "excluded")
+      allowed_instance_types                           = optional(list(string), [])
+      excluded_instance_types                          = optional(list(string), [])
+      accelerator_types                                = optional(list(string), [])
+      accelerator_manufacturers                        = optional(list(string), [])
+      accelerator_count_min                            = optional(number, -1)
+      accelerator_count_max                            = optional(number, -1)
+      spot_max_price_percentage_over_lowest_price      = optional(number, -1)
+      on_demand_max_price_percentage_over_lowest_price = optional(number, -1)
+    }), {})
+  }))
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = alltrue([for k, p in var.managed_instances_capacity_providers : can(regex("^[a-z][a-z0-9-]{0,30}$", k)) ? !contains(concat(["on_demand", "balanced", "spot_preferred", "spot_only"], keys(var.ec2_capacity_providers)), k) : false])
+    error_message = "managed_instances_capacity_providers keys must be 1-31 lowercase letters, digits or hyphens, starting with a letter, and neither a capacity preset name nor an ec2_capacity_providers key."
+  }
+
+  validation {
+    # https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_CreateCapacityProvider.html
+    condition     = length(var.managed_instances_capacity_providers) == 0 ? true : !can(regex("^(aws|ecs|fargate)", var.name))
+    error_message = "Capacity providers are registered as <name>-<key>, and ECS refuses a capacity provider name that starts with aws, ecs or fargate. Choose a name that does not."
+  }
+
+  validation {
+    # The data volume is 30-16384 GiB.
+    # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ManagedInstances.html
+    condition = alltrue([for k, p in var.managed_instances_capacity_providers : alltrue([
+      contains(["ON_DEMAND", "SPOT"], p.capacity_option_type),
+      contains(["BASIC", "DETAILED"], p.monitoring),
+      p.storage_size_gib == 0 ? true : (p.storage_size_gib >= 30 ? p.storage_size_gib <= 16384 : false),
+      p.scale_in_after_seconds == null ? true : (p.scale_in_after_seconds >= -1 ? p.scale_in_after_seconds <= 3600 : false),
+      p.instance_profile_arn == "" ? true : can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:instance-profile/", p.instance_profile_arn)),
+      alltrue([for s in p.subnet_ids : can(regex("^subnet-[0-9a-f]{8,17}$", s))]),
+      alltrue([for g in p.security_group_ids : can(regex("^sg-[0-9a-f]{8,17}$", g))]),
+    ])])
+    error_message = "managed_instances_capacity_providers: capacity_option_type is ON_DEMAND or SPOT; monitoring is BASIC or DETAILED; storage_size_gib is 0 (80 GiB) or 30-16384; scale_in_after_seconds is unset, -1 or 0-3600; instance_profile_arn is empty or an instance profile ARN; subnet and security group IDs are subnet-... and sg-...."
+  }
+
+  validation {
+    condition = alltrue([for k, p in var.managed_instances_capacity_providers : p.instance_requirements.vcpu_min == 0 ? true : alltrue([
+      p.instance_requirements.vcpu_min >= 1,
+      p.instance_requirements.vcpu_max == -1 ? true : p.instance_requirements.vcpu_max >= p.instance_requirements.vcpu_min,
+      p.instance_requirements.memory_mib_min >= 0,
+      p.instance_requirements.memory_mib_max == -1 ? true : p.instance_requirements.memory_mib_max >= p.instance_requirements.memory_mib_min,
+      alltrue([for m in p.instance_requirements.cpu_manufacturers : contains(["intel", "amd", "amazon-web-services"], m)]),
+      alltrue([for g in p.instance_requirements.instance_generations : contains(["current", "previous"], g)]),
+      contains(["included", "excluded", "required"], p.instance_requirements.burstable_performance),
+      contains(["included", "excluded", "required"], p.instance_requirements.bare_metal),
+      length(p.instance_requirements.allowed_instance_types) == 0 ? true : length(p.instance_requirements.excluded_instance_types) == 0,
+      alltrue([for a in p.instance_requirements.accelerator_types : contains(["gpu", "fpga", "inference"], a)]),
+      alltrue([for m in p.instance_requirements.accelerator_manufacturers : contains(["amazon-web-services", "amd", "nvidia", "xilinx", "habana"], m)]),
+      p.instance_requirements.accelerator_count_max == -1 ? true : p.instance_requirements.accelerator_count_max >= max(p.instance_requirements.accelerator_count_min, 0),
+    ])])
+    error_message = "managed_instances_capacity_providers[*].instance_requirements: vcpu_min 1 or more (0 lets ECS choose) with vcpu_max -1 or at least vcpu_min; memory ranges likewise; cpu_manufacturers intel, amd or amazon-web-services; instance_generations current or previous; burstable_performance and bare_metal included, excluded or required; allowed_instance_types and excluded_instance_types not both; accelerator_types gpu, fpga or inference; accelerator_manufacturers amazon-web-services, amd, nvidia, xilinx or habana; accelerator_count_max -1 or at least accelerator_count_min."
+  }
+}
+
 variable "external_capacity_providers" {
-  description = "Auto Scaling group capacity providers created outside this module (by another module or team) to register on the cluster. The cluster's provider list is owned by one resource, so this is the only way to add them. Services reference them by name in capacity or capacity_provider_strategy, with launch = \"EC2\". ECS Managed Instances providers need task definitions compatible with MANAGED_INSTANCES, which aws 5.x cannot declare, so they are not supported."
+  description = "Auto Scaling group capacity providers created outside this module (by another module or team) to register on the cluster. The cluster's provider list is owned by one resource, so this is the only way to add them. Services reference them by name in capacity or capacity_provider_strategy, with launch = \"EC2\". Managed Instances providers belong to one cluster from creation, so they are declared in managed_instances_capacity_providers instead."
   type        = list(string)
   default     = []
   nullable    = false
@@ -286,8 +384,8 @@ variable "external_capacity_providers" {
   }
 
   validation {
-    condition     = alltrue([for p in var.external_capacity_providers : !contains([for k in keys(var.ec2_capacity_providers) : "${var.name}-${k}"], p)])
-    error_message = "An external_capacity_providers name is the name of one of this module's ec2_capacity_providers (<name>-<key>); the module registers those itself."
+    condition     = alltrue([for p in var.external_capacity_providers : !contains([for k in concat(keys(var.ec2_capacity_providers), keys(var.managed_instances_capacity_providers)) : "${var.name}-${k}"], p)])
+    error_message = "An external_capacity_providers name is the name of one of this module's own capacity providers (<name>-<key>); the module registers those itself."
   }
 }
 
@@ -398,7 +496,17 @@ variable "permissions_boundary_arn" {
 }
 
 variable "infrastructure_role" {
-  description = "The role ECS uses to create and attach EBS volumes for services with managed_ebs_volume. create = true makes <name>-ecs-infrastructure with AmazonECSInfrastructureRolePolicyForVolumes; create = false uses arn. Not used when no service has a managed EBS volume."
+  description = <<-EOT
+    The role ECS assumes to act on infrastructure for the cluster. create = true makes <name>-ecs-infrastructure with
+    only the policies the configuration needs; create = false uses arn, which must allow the same:
+      managed_ebs_volume                        AmazonECSInfrastructureRolePolicyForVolumes
+      load_balancers on a BLUE_GREEN, LINEAR
+      or CANARY service                         AmazonECSInfrastructureRolePolicyForLoadBalancers
+      deployment.lifecycle_hooks                lambda:InvokeFunction on the hook functions
+      managed_instances_capacity_providers      AmazonECSInfrastructureRolePolicyForManagedInstances, plus
+                                                iam:PassRole on instance roles not named ecsInstanceRole*
+    Not created when nothing needs it.
+  EOT
   type = object({
     create = optional(bool, true)
     arn    = optional(string, "")
@@ -548,9 +656,15 @@ variable "services" {
     The smallest entry is { image = "...", port = 8080, desired_count = 2 }: one container named after the service.
     For sidecars, init containers or log routers use containers, keyed by container name.
 
-    capacity picks a preset (on_demand, balanced, spot_preferred, spot_only) or an ec2_capacity_providers key;
+    launch is FARGATE, EC2 or MANAGED_INSTANCES. capacity picks a preset (on_demand, balanced, spot_preferred,
+    spot_only), an ec2_capacity_providers key or a managed_instances_capacity_providers key;
     capacity_provider_strategy overrides it with an explicit list. Empty: on Fargate, default_capacity when it is a
-    preset, otherwise on_demand; on EC2 (except a daemon), required.
+    preset, otherwise on_demand; on EC2 (except a daemon) and Managed Instances, required.
+
+    deployment.strategy ROLLING replaces tasks in place. BLUE_GREEN, LINEAR and CANARY start the new revision beside
+    the old one and shift traffic to it (all at once, in steps, or a canary share first); both revisions run, and
+    are billed, until bake_time_minutes after the shift. With load_balancers, each one needs
+    alternate_target_group_arn and production_listener_rule_arn.
 
     Prices (eu-west-2, COSTS.md): Fargate $0.04656 per vCPU-hour and $0.00511 per GB-hour (ARM64 20% less);
     ephemeral_storage_gib above 20 GiB $0.000129 per GB-hour.
@@ -677,9 +791,12 @@ variable "services" {
     assign_public_ip   = optional(bool, false)
 
     load_balancers = optional(list(object({
-      target_group_arn = string
-      container_name   = optional(string, "")
-      container_port   = optional(number, 0)
+      target_group_arn             = string
+      container_name               = optional(string, "")
+      container_port               = optional(number, 0)
+      alternate_target_group_arn   = optional(string, "")
+      production_listener_rule_arn = optional(string, "")
+      test_listener_rule_arn       = optional(string, "")
     })), [])
     health_check_grace_period_seconds = optional(number, 0)
 
@@ -692,6 +809,18 @@ variable "services" {
       wait_for_steady_state          = optional(bool, false)
       availability_zone_rebalancing  = optional(bool, true)
       ignore_task_definition_changes = optional(bool, false)
+      strategy                       = optional(string, "ROLLING")
+      bake_time_minutes              = optional(number, 10)
+      canary_percent                 = optional(number, 5)
+      canary_bake_minutes            = optional(number, 10)
+      linear_step_percent            = optional(number, 10)
+      linear_step_bake_minutes       = optional(number, 6)
+      sigint_rollback                = optional(bool, false)
+      lifecycle_hooks = optional(map(object({
+        function_arn = string
+        stages       = list(string)
+        details      = optional(string, "")
+      })), {})
     }), {})
 
     autoscaling = optional(object({
@@ -735,6 +864,10 @@ variable "services" {
     service_connect = optional(object({
       namespace_arn = optional(string, "")
       log_proxy     = optional(bool, true)
+      access_logs = optional(object({
+        format                   = optional(string, "JSON")
+        include_query_parameters = optional(bool, false)
+      }))
       expose = optional(map(object({
         discovery_name              = optional(string, "")
         dns_name                    = optional(string, "")
@@ -742,6 +875,10 @@ variable "services" {
         ingress_port_override       = optional(number, 0)
         idle_timeout_seconds        = optional(number, 0)
         per_request_timeout_seconds = optional(number, 0)
+        test_traffic_header = optional(object({
+          name  = string
+          value = string
+        }))
       })), {})
     }))
     service_discovery = optional(object({
@@ -819,8 +956,8 @@ variable "services" {
   }
 
   validation {
-    condition     = alltrue([for k, s in var.services : contains(["FARGATE", "EC2"], s.launch)])
-    error_message = "services[*].launch must be FARGATE or EC2."
+    condition     = alltrue([for k, s in var.services : contains(["FARGATE", "EC2", "MANAGED_INSTANCES"], s.launch)])
+    error_message = "services[*].launch must be FARGATE, EC2 or MANAGED_INSTANCES."
   }
 
   validation {
@@ -974,6 +1111,12 @@ variable "services" {
   }
 
   validation {
+    # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ManagedInstances.html
+    condition     = alltrue([for k, s in var.services : s.launch == "MANAGED_INSTANCES" ? contains(["awsvpc", "host"], s.network_mode) : true])
+    error_message = "Managed Instances support only network_mode awsvpc or host."
+  }
+
+  validation {
     condition = alltrue([for k, s in var.services : s.launch != "FARGATE" ? true : alltrue([
       s.network_mode == "awsvpc",
       length(s.placement_constraints) == 0,
@@ -1041,8 +1184,9 @@ variable "services" {
   validation {
     condition = alltrue([for k, s in var.services : s.capacity == "" ? true : (s.launch == "FARGATE"
       ? contains(["on_demand", "balanced", "spot_preferred", "spot_only"], s.capacity)
-    : contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), s.capacity))])
-    error_message = "services[*].capacity is a preset (on_demand, balanced, spot_preferred, spot_only) on FARGATE, or an ec2_capacity_providers key or external_capacity_providers name on EC2."
+      : (s.launch == "EC2" ? contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), s.capacity)
+    : contains(keys(var.managed_instances_capacity_providers), s.capacity)))])
+    error_message = "services[*].capacity is a preset (on_demand, balanced, spot_preferred, spot_only) on FARGATE, an ec2_capacity_providers key or external_capacity_providers name on EC2, or a managed_instances_capacity_providers key on MANAGED_INSTANCES."
   }
 
   validation {
@@ -1050,8 +1194,9 @@ variable "services" {
     # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html
     condition = alltrue([for k, s in var.services : alltrue([for p in s.capacity_provider_strategy : s.launch == "FARGATE"
       ? contains(["FARGATE", "FARGATE_SPOT"], p.capacity_provider)
-    : contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), p.capacity_provider)])])
-    error_message = "capacity_provider_strategy entries are FARGATE or FARGATE_SPOT on a FARGATE launch, and ec2_capacity_providers keys or external_capacity_providers names on an EC2 launch. ECS does not mix the two in one strategy."
+      : (s.launch == "EC2" ? contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), p.capacity_provider)
+    : contains(keys(var.managed_instances_capacity_providers), p.capacity_provider))])])
+    error_message = "capacity_provider_strategy entries are FARGATE or FARGATE_SPOT on a FARGATE launch, ec2_capacity_providers keys or external_capacity_providers names on an EC2 launch, and managed_instances_capacity_providers keys on a MANAGED_INSTANCES launch. ECS does not mix the kinds in one strategy."
   }
 
   validation {
@@ -1065,8 +1210,8 @@ variable "services" {
   }
 
   validation {
-    condition     = alltrue([for k, s in var.services : s.launch == "EC2" && s.workload != "daemon" ? (s.capacity != "" ? true : length(s.capacity_provider_strategy) > 0) : true])
-    error_message = "An EC2 workload other than a daemon needs capacity (an ec2_capacity_providers key) or capacity_provider_strategy."
+    condition     = alltrue([for k, s in var.services : s.launch != "FARGATE" && s.workload != "daemon" ? (s.capacity != "" ? true : length(s.capacity_provider_strategy) > 0) : true])
+    error_message = "An EC2 or Managed Instances workload other than a daemon needs capacity (a capacity provider key) or capacity_provider_strategy."
   }
 
   # --- service settings ---------------------------------------------------
@@ -1092,6 +1237,39 @@ variable "services" {
   }
 
   validation {
+    # https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html
+    condition = alltrue([for k, s in var.services : alltrue([
+      contains(["ROLLING", "BLUE_GREEN", "LINEAR", "CANARY"], s.deployment.strategy),
+      s.deployment.strategy == "ROLLING" ? true : s.workload == "service",
+      s.deployment.bake_time_minutes >= 0, s.deployment.bake_time_minutes <= 1440,
+      s.deployment.canary_percent >= 0.1, s.deployment.canary_percent <= 100,
+      s.deployment.canary_bake_minutes >= 0, s.deployment.canary_bake_minutes <= 1440,
+      s.deployment.linear_step_percent >= 3, s.deployment.linear_step_percent <= 100,
+      s.deployment.linear_step_bake_minutes >= 0, s.deployment.linear_step_bake_minutes <= 1440,
+    ])])
+    error_message = "deployment: strategy is ROLLING, BLUE_GREEN, LINEAR or CANARY, and only a service workload deploys with anything but ROLLING; bake_time_minutes, canary_bake_minutes and linear_step_bake_minutes are 0-1440; canary_percent is 0.1-100; linear_step_percent is 3-100."
+  }
+
+  validation {
+    # The provider only watches for SIGINT while it waits for the deployment.
+    # https://github.com/hashicorp/terraform-provider-aws/blob/v6.57.1/website/docs/r/ecs_service.html.markdown
+    condition     = alltrue([for k, s in var.services : s.deployment.sigint_rollback ? (s.deployment.wait_for_steady_state ? s.workload == "service" : false) : true])
+    error_message = "deployment.sigint_rollback needs deployment.wait_for_steady_state = true and a service workload: the rollback on a cancelled run only happens while Terraform waits for the deployment."
+  }
+
+  validation {
+    # https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentLifecycleHook.html
+    condition = alltrue([for k, s in var.services : alltrue([for n, h in s.deployment.lifecycle_hooks : alltrue([
+      can(regex("^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]{1,64}(:[A-Za-z0-9$_-]{1,128})?$", h.function_arn)),
+      length(h.stages) > 0,
+      alltrue([for st in h.stages : contains(["RECONCILE_SERVICE", "PRE_SCALE_UP", "POST_SCALE_UP", "TEST_TRAFFIC_SHIFT", "POST_TEST_TRAFFIC_SHIFT", "PRE_PRODUCTION_TRAFFIC_SHIFT", "PRODUCTION_TRAFFIC_SHIFT", "POST_PRODUCTION_TRAFFIC_SHIFT"], st)]),
+      h.details == "" ? true : can(jsondecode(h.details)),
+      s.workload == "service",
+    ])])])
+    error_message = "deployment.lifecycle_hooks: function_arn is a Lambda function ARN (optionally with a version or alias); stages lists one or more of RECONCILE_SERVICE, PRE_SCALE_UP, POST_SCALE_UP, TEST_TRAFFIC_SHIFT, POST_TEST_TRAFFIC_SHIFT, PRE_PRODUCTION_TRAFFIC_SHIFT, PRODUCTION_TRAFFIC_SHIFT, POST_PRODUCTION_TRAFFIC_SHIFT; details is empty or JSON; the workload is a service."
+  }
+
+  validation {
     condition     = alltrue([for k, s in var.services : s.health_check_grace_period_seconds >= 0 && s.health_check_grace_period_seconds <= 2147483647])
     error_message = "services[*].health_check_grace_period_seconds must be 0 or more."
   }
@@ -1100,6 +1278,19 @@ variable "services" {
     condition = alltrue([for k, s in var.services : alltrue([for lb in s.load_balancers :
     can(regex("^arn:aws[a-z-]*:elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:targetgroup/", lb.target_group_arn))])])
     error_message = "load_balancers[*].target_group_arn must be a target group ARN. Classic Load Balancers are not supported."
+  }
+
+  validation {
+    # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/alb-resources-for-blue-green.html
+    condition = alltrue([for k, s in var.services : alltrue([for lb in s.load_balancers : alltrue([
+      s.deployment.strategy == "ROLLING" ? alltrue([lb.alternate_target_group_arn == "", lb.production_listener_rule_arn == "", lb.test_listener_rule_arn == ""]) : alltrue([
+        can(regex("^arn:aws[a-z-]*:elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:targetgroup/", lb.alternate_target_group_arn)),
+        lb.alternate_target_group_arn != lb.target_group_arn,
+        can(regex("^arn:aws[a-z-]*:elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:listener(-rule)?/(app|net)/", lb.production_listener_rule_arn)),
+        lb.test_listener_rule_arn == "" ? true : can(regex("^arn:aws[a-z-]*:elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:listener(-rule)?/(app|net)/", lb.test_listener_rule_arn)),
+      ]),
+    ])])])
+    error_message = "load_balancers on a BLUE_GREEN, LINEAR or CANARY service each need alternate_target_group_arn (a second target group, not target_group_arn) and production_listener_rule_arn (an ALB listener rule or NLB listener ARN), and optionally test_listener_rule_arn; ECS moves traffic between the two target groups through those rules. On a ROLLING service the three are empty."
   }
 
   validation {
@@ -1124,6 +1315,23 @@ variable "services" {
       : alltrue([for p, e in s.service_connect.expose : contains(flatten([for c in values(s.containers) : [for m in c.port_mappings : m.name]]), p)])
     )])
     error_message = "service_connect.expose is keyed by port name: with the image shortcut the only port name is the service key (and port must be set); with containers, a port_mappings name."
+  }
+
+  validation {
+    # Access logs go through the proxy's logConfiguration; header rules need an
+    # application protocol on the port.
+    # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect-envoy-access-logs.html
+    # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect-blue-green.html
+    condition = alltrue([for k, s in var.services : s.service_connect == null ? true : alltrue([
+      s.service_connect.access_logs == null ? true : (s.service_connect.log_proxy ? contains(["TEXT", "JSON"], s.service_connect.access_logs.format) : false),
+      alltrue([for p, e in s.service_connect.expose : e.test_traffic_header == null ? true : alltrue([
+        s.deployment.strategy != "ROLLING",
+        can(regex("^[A-Za-z0-9-]{1,256}$", e.test_traffic_header.name)),
+        e.test_traffic_header.value != "",
+        length(setintersection(toset(["http", "http2", "grpc"]), toset(flatten([for c in values(s.containers) : [for m in c.port_mappings : m.app_protocol if m.name == p]])))) > 0,
+      ])]),
+    ])])
+    error_message = "service_connect: access_logs needs log_proxy = true and format TEXT or JSON; expose[*].test_traffic_header needs a BLUE_GREEN, LINEAR or CANARY strategy, a header name and value, and a port mapping with app_protocol http, http2 or grpc (the image shortcut has none)."
   }
 
   validation {

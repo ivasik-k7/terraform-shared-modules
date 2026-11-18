@@ -3,9 +3,10 @@
 # apply, and a service deployed by an external pipeline must not have its
 # running revision reset. tests/service_parity.py fails when the bodies drift.
 #
-# force_new_deployment is always true: without it, changing
-# capacity_provider_strategy replaces the service on aws 5.x and is refused
-# at plan on 6.x. With it, every update of the service starts a deployment.
+# force_new_deployment is always true: the provider refuses a change of
+# capacity_provider_strategy without it. With it, every update of the service
+# starts a deployment.
+# https://github.com/hashicorp/terraform-provider-aws/blob/v6.57.1/internal/service/ecs/service.go
 
 resource "aws_ecs_service" "this" {
   for_each = local.static
@@ -28,9 +29,45 @@ resource "aws_ecs_service" "this" {
   availability_zone_rebalancing      = each.value.workload == "daemon" ? null : (local.az_rebalancing[each.key] ? "ENABLED" : "DISABLED")
   deployment_maximum_percent         = each.value.workload == "daemon" ? null : each.value.deployment.maximum_percent
   deployment_minimum_healthy_percent = each.value.deployment.minimum_healthy_percent != null ? each.value.deployment.minimum_healthy_percent : (each.value.workload == "daemon" ? 0 : 100)
+  sigint_rollback                    = each.value.workload == "service" ? each.value.deployment.sigint_rollback : null
 
   deployment_controller {
     type = "ECS"
+  }
+
+  # Sent for every service: an omitted block keeps the strategy last applied.
+  dynamic "deployment_configuration" {
+    for_each = each.value.workload == "service" ? [each.value.deployment] : []
+    content {
+      strategy             = deployment_configuration.value.strategy
+      bake_time_in_minutes = deployment_configuration.value.strategy == "ROLLING" ? null : deployment_configuration.value.bake_time_minutes
+
+      dynamic "canary_configuration" {
+        for_each = deployment_configuration.value.strategy == "CANARY" ? [deployment_configuration.value] : []
+        content {
+          canary_percent              = canary_configuration.value.canary_percent
+          canary_bake_time_in_minutes = canary_configuration.value.canary_bake_minutes
+        }
+      }
+
+      dynamic "linear_configuration" {
+        for_each = deployment_configuration.value.strategy == "LINEAR" ? [deployment_configuration.value] : []
+        content {
+          step_percent              = linear_configuration.value.linear_step_percent
+          step_bake_time_in_minutes = linear_configuration.value.linear_step_bake_minutes
+        }
+      }
+
+      dynamic "lifecycle_hook" {
+        for_each = deployment_configuration.value.lifecycle_hooks
+        content {
+          hook_target_arn  = lifecycle_hook.value.function_arn
+          role_arn         = local.infrastructure_role_in_use
+          lifecycle_stages = lifecycle_hook.value.stages
+          hook_details     = lifecycle_hook.value.details != "" ? lifecycle_hook.value.details : null
+        }
+      }
+    }
   }
 
   dynamic "deployment_circuit_breaker" {
@@ -74,6 +111,16 @@ resource "aws_ecs_service" "this" {
       target_group_arn = load_balancer.value.target_group_arn
       container_name   = load_balancer.value.container_name
       container_port   = load_balancer.value.container_port
+
+      dynamic "advanced_configuration" {
+        for_each = load_balancer.value.alternate_target_group_arn != "" ? [load_balancer.value] : []
+        content {
+          alternate_target_group_arn = advanced_configuration.value.alternate_target_group_arn
+          production_listener_rule   = advanced_configuration.value.production_listener_rule_arn
+          test_listener_rule         = advanced_configuration.value.test_listener_rule_arn != "" ? advanced_configuration.value.test_listener_rule_arn : null
+          role_arn                   = local.infrastructure_role_in_use
+        }
+      }
     }
   }
 
@@ -104,6 +151,14 @@ resource "aws_ecs_service" "this" {
         }
       }
 
+      dynamic "access_log_configuration" {
+        for_each = service_connect_configuration.value.access_logs != null ? [service_connect_configuration.value.access_logs] : []
+        content {
+          format                   = access_log_configuration.value.format
+          include_query_parameters = access_log_configuration.value.include_query_parameters ? "ENABLED" : "DISABLED"
+        }
+      }
+
       dynamic "service" {
         for_each = local.service_connect_expose[each.key]
         content {
@@ -114,6 +169,18 @@ resource "aws_ecs_service" "this" {
           client_alias {
             port     = service.value.port > 0 ? service.value.port : local.port_by_name[each.key][service.key]
             dns_name = service.value.dns_name != "" ? service.value.dns_name : null
+
+            dynamic "test_traffic_rules" {
+              for_each = service.value.test_traffic_header != null ? [service.value.test_traffic_header] : []
+              content {
+                header {
+                  name = test_traffic_rules.value.name
+                  value {
+                    exact = test_traffic_rules.value.value
+                  }
+                }
+              }
+            }
           }
 
           dynamic "timeout" {
@@ -134,7 +201,7 @@ resource "aws_ecs_service" "this" {
       name = volume_configuration.value.volume_name
 
       managed_ebs_volume {
-        role_arn         = local.create_infra_role ? aws_iam_role.infrastructure[0].arn : local.infrastructure_arn
+        role_arn         = local.infrastructure_role_in_use
         encrypted        = true
         kms_key_id       = volume_configuration.value.kms_key_arn != "" ? volume_configuration.value.kms_key_arn : null
         size_in_gb       = volume_configuration.value.size_in_gb > 0 ? volume_configuration.value.size_in_gb : null
@@ -181,6 +248,7 @@ resource "aws_ecs_service" "this" {
     aws_iam_role_policy.task_custom,
     aws_iam_role_policy_attachment.task_managed,
     aws_iam_role_policy_attachment.infrastructure,
+    aws_iam_role_policy.infrastructure_module,
     aws_cloudwatch_log_group.this,
   ]
   # END SERVICE BODY
@@ -207,9 +275,45 @@ resource "aws_ecs_service" "autoscaled" {
   availability_zone_rebalancing      = each.value.workload == "daemon" ? null : (local.az_rebalancing[each.key] ? "ENABLED" : "DISABLED")
   deployment_maximum_percent         = each.value.workload == "daemon" ? null : each.value.deployment.maximum_percent
   deployment_minimum_healthy_percent = each.value.deployment.minimum_healthy_percent != null ? each.value.deployment.minimum_healthy_percent : (each.value.workload == "daemon" ? 0 : 100)
+  sigint_rollback                    = each.value.workload == "service" ? each.value.deployment.sigint_rollback : null
 
   deployment_controller {
     type = "ECS"
+  }
+
+  # Sent for every service: an omitted block keeps the strategy last applied.
+  dynamic "deployment_configuration" {
+    for_each = each.value.workload == "service" ? [each.value.deployment] : []
+    content {
+      strategy             = deployment_configuration.value.strategy
+      bake_time_in_minutes = deployment_configuration.value.strategy == "ROLLING" ? null : deployment_configuration.value.bake_time_minutes
+
+      dynamic "canary_configuration" {
+        for_each = deployment_configuration.value.strategy == "CANARY" ? [deployment_configuration.value] : []
+        content {
+          canary_percent              = canary_configuration.value.canary_percent
+          canary_bake_time_in_minutes = canary_configuration.value.canary_bake_minutes
+        }
+      }
+
+      dynamic "linear_configuration" {
+        for_each = deployment_configuration.value.strategy == "LINEAR" ? [deployment_configuration.value] : []
+        content {
+          step_percent              = linear_configuration.value.linear_step_percent
+          step_bake_time_in_minutes = linear_configuration.value.linear_step_bake_minutes
+        }
+      }
+
+      dynamic "lifecycle_hook" {
+        for_each = deployment_configuration.value.lifecycle_hooks
+        content {
+          hook_target_arn  = lifecycle_hook.value.function_arn
+          role_arn         = local.infrastructure_role_in_use
+          lifecycle_stages = lifecycle_hook.value.stages
+          hook_details     = lifecycle_hook.value.details != "" ? lifecycle_hook.value.details : null
+        }
+      }
+    }
   }
 
   dynamic "deployment_circuit_breaker" {
@@ -253,6 +357,16 @@ resource "aws_ecs_service" "autoscaled" {
       target_group_arn = load_balancer.value.target_group_arn
       container_name   = load_balancer.value.container_name
       container_port   = load_balancer.value.container_port
+
+      dynamic "advanced_configuration" {
+        for_each = load_balancer.value.alternate_target_group_arn != "" ? [load_balancer.value] : []
+        content {
+          alternate_target_group_arn = advanced_configuration.value.alternate_target_group_arn
+          production_listener_rule   = advanced_configuration.value.production_listener_rule_arn
+          test_listener_rule         = advanced_configuration.value.test_listener_rule_arn != "" ? advanced_configuration.value.test_listener_rule_arn : null
+          role_arn                   = local.infrastructure_role_in_use
+        }
+      }
     }
   }
 
@@ -283,6 +397,14 @@ resource "aws_ecs_service" "autoscaled" {
         }
       }
 
+      dynamic "access_log_configuration" {
+        for_each = service_connect_configuration.value.access_logs != null ? [service_connect_configuration.value.access_logs] : []
+        content {
+          format                   = access_log_configuration.value.format
+          include_query_parameters = access_log_configuration.value.include_query_parameters ? "ENABLED" : "DISABLED"
+        }
+      }
+
       dynamic "service" {
         for_each = local.service_connect_expose[each.key]
         content {
@@ -293,6 +415,18 @@ resource "aws_ecs_service" "autoscaled" {
           client_alias {
             port     = service.value.port > 0 ? service.value.port : local.port_by_name[each.key][service.key]
             dns_name = service.value.dns_name != "" ? service.value.dns_name : null
+
+            dynamic "test_traffic_rules" {
+              for_each = service.value.test_traffic_header != null ? [service.value.test_traffic_header] : []
+              content {
+                header {
+                  name = test_traffic_rules.value.name
+                  value {
+                    exact = test_traffic_rules.value.value
+                  }
+                }
+              }
+            }
           }
 
           dynamic "timeout" {
@@ -313,7 +447,7 @@ resource "aws_ecs_service" "autoscaled" {
       name = volume_configuration.value.volume_name
 
       managed_ebs_volume {
-        role_arn         = local.create_infra_role ? aws_iam_role.infrastructure[0].arn : local.infrastructure_arn
+        role_arn         = local.infrastructure_role_in_use
         encrypted        = true
         kms_key_id       = volume_configuration.value.kms_key_arn != "" ? volume_configuration.value.kms_key_arn : null
         size_in_gb       = volume_configuration.value.size_in_gb > 0 ? volume_configuration.value.size_in_gb : null
@@ -360,6 +494,7 @@ resource "aws_ecs_service" "autoscaled" {
     aws_iam_role_policy.task_custom,
     aws_iam_role_policy_attachment.task_managed,
     aws_iam_role_policy_attachment.infrastructure,
+    aws_iam_role_policy.infrastructure_module,
     aws_cloudwatch_log_group.this,
   ]
   # END SERVICE BODY
@@ -390,9 +525,45 @@ resource "aws_ecs_service" "static_ignored" {
   availability_zone_rebalancing      = each.value.workload == "daemon" ? null : (local.az_rebalancing[each.key] ? "ENABLED" : "DISABLED")
   deployment_maximum_percent         = each.value.workload == "daemon" ? null : each.value.deployment.maximum_percent
   deployment_minimum_healthy_percent = each.value.deployment.minimum_healthy_percent != null ? each.value.deployment.minimum_healthy_percent : (each.value.workload == "daemon" ? 0 : 100)
+  sigint_rollback                    = each.value.workload == "service" ? each.value.deployment.sigint_rollback : null
 
   deployment_controller {
     type = "ECS"
+  }
+
+  # Sent for every service: an omitted block keeps the strategy last applied.
+  dynamic "deployment_configuration" {
+    for_each = each.value.workload == "service" ? [each.value.deployment] : []
+    content {
+      strategy             = deployment_configuration.value.strategy
+      bake_time_in_minutes = deployment_configuration.value.strategy == "ROLLING" ? null : deployment_configuration.value.bake_time_minutes
+
+      dynamic "canary_configuration" {
+        for_each = deployment_configuration.value.strategy == "CANARY" ? [deployment_configuration.value] : []
+        content {
+          canary_percent              = canary_configuration.value.canary_percent
+          canary_bake_time_in_minutes = canary_configuration.value.canary_bake_minutes
+        }
+      }
+
+      dynamic "linear_configuration" {
+        for_each = deployment_configuration.value.strategy == "LINEAR" ? [deployment_configuration.value] : []
+        content {
+          step_percent              = linear_configuration.value.linear_step_percent
+          step_bake_time_in_minutes = linear_configuration.value.linear_step_bake_minutes
+        }
+      }
+
+      dynamic "lifecycle_hook" {
+        for_each = deployment_configuration.value.lifecycle_hooks
+        content {
+          hook_target_arn  = lifecycle_hook.value.function_arn
+          role_arn         = local.infrastructure_role_in_use
+          lifecycle_stages = lifecycle_hook.value.stages
+          hook_details     = lifecycle_hook.value.details != "" ? lifecycle_hook.value.details : null
+        }
+      }
+    }
   }
 
   dynamic "deployment_circuit_breaker" {
@@ -436,6 +607,16 @@ resource "aws_ecs_service" "static_ignored" {
       target_group_arn = load_balancer.value.target_group_arn
       container_name   = load_balancer.value.container_name
       container_port   = load_balancer.value.container_port
+
+      dynamic "advanced_configuration" {
+        for_each = load_balancer.value.alternate_target_group_arn != "" ? [load_balancer.value] : []
+        content {
+          alternate_target_group_arn = advanced_configuration.value.alternate_target_group_arn
+          production_listener_rule   = advanced_configuration.value.production_listener_rule_arn
+          test_listener_rule         = advanced_configuration.value.test_listener_rule_arn != "" ? advanced_configuration.value.test_listener_rule_arn : null
+          role_arn                   = local.infrastructure_role_in_use
+        }
+      }
     }
   }
 
@@ -466,6 +647,14 @@ resource "aws_ecs_service" "static_ignored" {
         }
       }
 
+      dynamic "access_log_configuration" {
+        for_each = service_connect_configuration.value.access_logs != null ? [service_connect_configuration.value.access_logs] : []
+        content {
+          format                   = access_log_configuration.value.format
+          include_query_parameters = access_log_configuration.value.include_query_parameters ? "ENABLED" : "DISABLED"
+        }
+      }
+
       dynamic "service" {
         for_each = local.service_connect_expose[each.key]
         content {
@@ -476,6 +665,18 @@ resource "aws_ecs_service" "static_ignored" {
           client_alias {
             port     = service.value.port > 0 ? service.value.port : local.port_by_name[each.key][service.key]
             dns_name = service.value.dns_name != "" ? service.value.dns_name : null
+
+            dynamic "test_traffic_rules" {
+              for_each = service.value.test_traffic_header != null ? [service.value.test_traffic_header] : []
+              content {
+                header {
+                  name = test_traffic_rules.value.name
+                  value {
+                    exact = test_traffic_rules.value.value
+                  }
+                }
+              }
+            }
           }
 
           dynamic "timeout" {
@@ -496,7 +697,7 @@ resource "aws_ecs_service" "static_ignored" {
       name = volume_configuration.value.volume_name
 
       managed_ebs_volume {
-        role_arn         = local.create_infra_role ? aws_iam_role.infrastructure[0].arn : local.infrastructure_arn
+        role_arn         = local.infrastructure_role_in_use
         encrypted        = true
         kms_key_id       = volume_configuration.value.kms_key_arn != "" ? volume_configuration.value.kms_key_arn : null
         size_in_gb       = volume_configuration.value.size_in_gb > 0 ? volume_configuration.value.size_in_gb : null
@@ -543,6 +744,7 @@ resource "aws_ecs_service" "static_ignored" {
     aws_iam_role_policy.task_custom,
     aws_iam_role_policy_attachment.task_managed,
     aws_iam_role_policy_attachment.infrastructure,
+    aws_iam_role_policy.infrastructure_module,
     aws_cloudwatch_log_group.this,
   ]
   # END SERVICE BODY
@@ -573,9 +775,45 @@ resource "aws_ecs_service" "autoscaled_ignored" {
   availability_zone_rebalancing      = each.value.workload == "daemon" ? null : (local.az_rebalancing[each.key] ? "ENABLED" : "DISABLED")
   deployment_maximum_percent         = each.value.workload == "daemon" ? null : each.value.deployment.maximum_percent
   deployment_minimum_healthy_percent = each.value.deployment.minimum_healthy_percent != null ? each.value.deployment.minimum_healthy_percent : (each.value.workload == "daemon" ? 0 : 100)
+  sigint_rollback                    = each.value.workload == "service" ? each.value.deployment.sigint_rollback : null
 
   deployment_controller {
     type = "ECS"
+  }
+
+  # Sent for every service: an omitted block keeps the strategy last applied.
+  dynamic "deployment_configuration" {
+    for_each = each.value.workload == "service" ? [each.value.deployment] : []
+    content {
+      strategy             = deployment_configuration.value.strategy
+      bake_time_in_minutes = deployment_configuration.value.strategy == "ROLLING" ? null : deployment_configuration.value.bake_time_minutes
+
+      dynamic "canary_configuration" {
+        for_each = deployment_configuration.value.strategy == "CANARY" ? [deployment_configuration.value] : []
+        content {
+          canary_percent              = canary_configuration.value.canary_percent
+          canary_bake_time_in_minutes = canary_configuration.value.canary_bake_minutes
+        }
+      }
+
+      dynamic "linear_configuration" {
+        for_each = deployment_configuration.value.strategy == "LINEAR" ? [deployment_configuration.value] : []
+        content {
+          step_percent              = linear_configuration.value.linear_step_percent
+          step_bake_time_in_minutes = linear_configuration.value.linear_step_bake_minutes
+        }
+      }
+
+      dynamic "lifecycle_hook" {
+        for_each = deployment_configuration.value.lifecycle_hooks
+        content {
+          hook_target_arn  = lifecycle_hook.value.function_arn
+          role_arn         = local.infrastructure_role_in_use
+          lifecycle_stages = lifecycle_hook.value.stages
+          hook_details     = lifecycle_hook.value.details != "" ? lifecycle_hook.value.details : null
+        }
+      }
+    }
   }
 
   dynamic "deployment_circuit_breaker" {
@@ -619,6 +857,16 @@ resource "aws_ecs_service" "autoscaled_ignored" {
       target_group_arn = load_balancer.value.target_group_arn
       container_name   = load_balancer.value.container_name
       container_port   = load_balancer.value.container_port
+
+      dynamic "advanced_configuration" {
+        for_each = load_balancer.value.alternate_target_group_arn != "" ? [load_balancer.value] : []
+        content {
+          alternate_target_group_arn = advanced_configuration.value.alternate_target_group_arn
+          production_listener_rule   = advanced_configuration.value.production_listener_rule_arn
+          test_listener_rule         = advanced_configuration.value.test_listener_rule_arn != "" ? advanced_configuration.value.test_listener_rule_arn : null
+          role_arn                   = local.infrastructure_role_in_use
+        }
+      }
     }
   }
 
@@ -649,6 +897,14 @@ resource "aws_ecs_service" "autoscaled_ignored" {
         }
       }
 
+      dynamic "access_log_configuration" {
+        for_each = service_connect_configuration.value.access_logs != null ? [service_connect_configuration.value.access_logs] : []
+        content {
+          format                   = access_log_configuration.value.format
+          include_query_parameters = access_log_configuration.value.include_query_parameters ? "ENABLED" : "DISABLED"
+        }
+      }
+
       dynamic "service" {
         for_each = local.service_connect_expose[each.key]
         content {
@@ -659,6 +915,18 @@ resource "aws_ecs_service" "autoscaled_ignored" {
           client_alias {
             port     = service.value.port > 0 ? service.value.port : local.port_by_name[each.key][service.key]
             dns_name = service.value.dns_name != "" ? service.value.dns_name : null
+
+            dynamic "test_traffic_rules" {
+              for_each = service.value.test_traffic_header != null ? [service.value.test_traffic_header] : []
+              content {
+                header {
+                  name = test_traffic_rules.value.name
+                  value {
+                    exact = test_traffic_rules.value.value
+                  }
+                }
+              }
+            }
           }
 
           dynamic "timeout" {
@@ -679,7 +947,7 @@ resource "aws_ecs_service" "autoscaled_ignored" {
       name = volume_configuration.value.volume_name
 
       managed_ebs_volume {
-        role_arn         = local.create_infra_role ? aws_iam_role.infrastructure[0].arn : local.infrastructure_arn
+        role_arn         = local.infrastructure_role_in_use
         encrypted        = true
         kms_key_id       = volume_configuration.value.kms_key_arn != "" ? volume_configuration.value.kms_key_arn : null
         size_in_gb       = volume_configuration.value.size_in_gb > 0 ? volume_configuration.value.size_in_gb : null
@@ -726,6 +994,7 @@ resource "aws_ecs_service" "autoscaled_ignored" {
     aws_iam_role_policy.task_custom,
     aws_iam_role_policy_attachment.task_managed,
     aws_iam_role_policy_attachment.infrastructure,
+    aws_iam_role_policy.infrastructure_module,
     aws_cloudwatch_log_group.this,
   ]
   # END SERVICE BODY

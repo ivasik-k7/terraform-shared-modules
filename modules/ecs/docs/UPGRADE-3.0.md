@@ -36,30 +36,19 @@ group) and its rules from the plan into the new resource.
 | Task definitions | New revision per service | The family becomes `<name>-<key>` and the container definitions are rendered differently |
 | Task roles | Replaced | Named `<name>-<key>-task` |
 | Shared execution role | Destroyed; one `<name>-<key>-exec` per service created | Each workload reads only its own secrets |
-| Services without autoscaling | Updated in place: a rolling deployment to the new revision, except a `launch_type` service on aws 5.x (below) | Same address, `aws_ecs_service.this[<key>]` |
+| Services without autoscaling | Updated in place: a rolling deployment to the new revision | Same address, `aws_ecs_service.this[<key>]` |
 | Services with autoscaling | **Destroyed and created unless you add the `moved` block below** | They are now `aws_ecs_service.autoscaled[<key>]` |
 | Scaling targets and policies | Replaced, unless you move the targets | Keyed by service instead of by policy name |
 | Step-scaling policies and their alarms | Destroyed | Step scaling is not offered |
 
 Search the speculative plan for `must be replaced` and `will be destroyed` on
-`aws_ecs_service`: there should be none, with one exception below.
+`aws_ecs_service`: there should be none.
 
-**A service the old module created with `launch_type` is replaced on aws 5.x.**
-The old module sent `launch_type` when a service had no
-`capacity_provider_strategy`; this one always sends a strategy. At 5.100.0 the
-provider forces replacement when a strategy goes from empty to set, even with
-`force_new_deployment` (`internal/service/ecs/service.go`,
-`capacityProviderStrategyCustomizeDiff`), and a fixed service name means the
-old service is deleted before the new one exists. Either upgrade the workspace
-to aws 6.x first, where the change is an update, or switch each such service
-out of band before the plan:
-
-```
-aws ecs update-service --cluster <name> --service <key> \
-  --capacity-provider-strategy capacityProvider=FARGATE,weight=1,base=0 --force-new-deployment
-```
-
-then let the next plan refresh it.
+A service the old module created with `launch_type` gains a
+`capacity_provider_strategy` in place: on aws 6.x the strategy is not
+ForceNew, `launch_type` is computed and left unset, and the module sends
+`force_new_deployment` (`internal/service/ecs/service.go` at v6.57.1). That
+update starts a deployment of the service.
 
 ## Moves only you can write
 
@@ -92,7 +81,7 @@ moved {
 | `capacity_providers` with `type = "EC2"` | `ec2_capacity_providers`, same keys, so the `moved` block keeps them |
 | `services[*].task_definition_family` | Removed: the family is `<name>-<key>` |
 | `services[*].task_cpu`, `task_memory` (strings) | `cpu`, `memory` (numbers, validated against Fargate's sizes) |
-| `services[*].requires_compatibilities`, `launch_type` | `launch = "FARGATE"` or `"EC2"`; the service always sends a capacity strategy |
+| `services[*].requires_compatibilities`, `launch_type` | `launch = "FARGATE"`, `"EC2"` or `"MANAGED_INSTANCES"`; the service always sends a capacity strategy |
 | `services[*].container_definitions` (list) | `containers` (map keyed by container name), or `image` for one container |
 | container `environment` (list of `{ name, value }`) | `environment` map; the same for `secrets` (`name => arn`, and only ARNs: a name or partial name is refused) |
 | container `depends_on` (list of `{ container_name, condition }`) | `depends_on` map `container => condition` |
@@ -101,7 +90,7 @@ moved {
 | `services[*].network_configuration` | `subnet_ids`, `security_group_ids`, `assign_public_ip` (module-level defaults available) |
 | `services[*].load_balancers` | Same, `container_name`/`container_port` optional with the image shortcut |
 | `services[*].service_registries` | `service_discovery = { registry_arn, dns_record_type = "SRV", container_name, container_port }` for an existing Cloud Map service, or `namespace_id` to let the module create it |
-| `services[*].deployment_configuration` | `deployment = { minimum_healthy_percent, maximum_percent, circuit_breaker, rollback, alarm_names }` |
+| `services[*].deployment_configuration` | `deployment = { minimum_healthy_percent, maximum_percent, circuit_breaker, rollback, alarm_names }`; native blue/green, linear and canary with `deployment.strategy` |
 | `services[*].wait_for_steady_state` | `deployment.wait_for_steady_state` |
 | `services[*].scheduling_strategy = "DAEMON"` | `workload = "daemon"` |
 | `services[*].force_new_deployment` | Removed: always on (see README, "Every service update is a deployment") |
@@ -129,10 +118,12 @@ moved {
 
 ## In HCP Terraform
 
-1. Raise the workspace's Terraform version to 1.9 or later, and let the lock
-   file move to `hashicorp/aws` 5.100.0 or later.
+1. Raise the workspace's Terraform version to 1.9 or later, and move the lock
+   file to `hashicorp/aws` 6.57.1 or later (`terraform init -upgrade`). A
+   workspace still on aws 5.x upgrades the provider first, on its own run,
+   following the provider's 6.0 upgrade guide.
 2. Change the call to the inputs above and add the root `moved` blocks.
 3. Open a pull request; read the speculative plan for replacements of
-   `aws_ecs_service` (none, once `launch_type` services are dealt with) and for
-   the role and task definition replacements listed above.
+   `aws_ecs_service` (there should be none) and for the role and task
+   definition replacements listed above.
 4. Apply in a window: every service rolls to a new revision with new roles.

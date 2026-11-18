@@ -104,7 +104,8 @@ resource "aws_iam_role_policy_attachment" "execution_managed" {
 }
 
 # ---------------------------------------------------------------------------
-# Infrastructure role: ECS creates and attaches managed EBS volumes with it.
+# Infrastructure role: ECS acts on volumes, load balancer rules, deployment
+# hooks and Managed Instances with it.
 # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/infrastructure_IAM_role.html
 # ---------------------------------------------------------------------------
 
@@ -112,7 +113,7 @@ resource "aws_iam_role" "infrastructure" {
   count = local.create_infra_role ? 1 : 0
 
   name                 = "${var.name}-ecs-infrastructure"
-  description          = "ECS infrastructure role for managed EBS volumes on cluster ${var.name}."
+  description          = "ECS infrastructure role for cluster ${var.name}: ${join(", ", concat(keys(local.infrastructure_policies), length(local.hooked) > 0 ? ["deployment_hooks"] : []))}."
   permissions_boundary = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
 
   assume_role_policy = jsonencode({
@@ -128,10 +129,75 @@ resource "aws_iam_role" "infrastructure" {
 }
 
 resource "aws_iam_role_policy_attachment" "infrastructure" {
-  count = local.create_infra_role ? 1 : 0
+  for_each = local.create_infra_role ? local.infrastructure_policies : {}
 
   role       = aws_iam_role.infrastructure[0].name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonECSInfrastructureRolePolicyForVolumes"
+  policy_arn = each.value
+}
+
+resource "aws_iam_role_policy" "infrastructure_module" {
+  count = local.create_infra_role && local.infrastructure_inline ? 1 : 0
+
+  name = "ecs-module"
+  role = aws_iam_role.infrastructure[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/blue-green-permissions.html
+      length(local.hooked) == 0 ? [] : [{
+        Sid      = "InvokeDeploymentHooks"
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = local.hook_functions
+      }],
+      length(local.supplied_instance_profile) == 0 ? [] : [{
+        Sid       = "PassSuppliedInstanceRoles"
+        Effect    = "Allow"
+        Action    = ["iam:PassRole"]
+        Resource  = [for k, d in data.aws_iam_instance_profile.managed_instances : d.role_arn]
+        Condition = { StringLike = { "iam:PassedToService" = "ec2.*" } }
+      }],
+    )
+  })
+}
+
+# ---------------------------------------------------------------------------
+# Managed Instances: the role the ECS agent on each instance uses.
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-instances-instance-profile.html
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_role" "instance" {
+  count = local.create_instance_profile ? 1 : 0
+
+  name                 = local.instance_role_name
+  description          = "ECS Managed Instances instance role for cluster ${var.name}."
+  permissions_boundary = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "instance" {
+  count = local.create_instance_profile ? 1 : 0
+
+  role       = aws_iam_role.instance[0].name
+  policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances"
+}
+
+resource "aws_iam_instance_profile" "instance" {
+  count = local.create_instance_profile ? 1 : 0
+
+  name = "${var.name}-ecs-managed-instances"
+  role = aws_iam_role.instance[0].name
+  tags = local.common_tags
 }
 
 # ---------------------------------------------------------------------------

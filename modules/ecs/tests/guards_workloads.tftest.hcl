@@ -8,7 +8,7 @@ mock_provider "aws" {
     defaults = { partition = "aws" }
   }
   mock_data "aws_region" {
-    defaults = { endpoint = "ec2.eu-west-2.amazonaws.com" }
+    defaults = { region = "eu-west-2" }
   }
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }

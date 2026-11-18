@@ -1,12 +1,13 @@
 # Every input, in the shape of a migrated on-premises application: an API
-# behind an ALB that scales on requests, a queue worker on Spot, a nightly
-# batch job, a schema migration run from the pipeline, a stateful service on
-# a managed EBS volume, and a log shipper on EC2 capacity.
+# behind an ALB that scales on requests and releases as a canary, a queue
+# worker on Spot, a nightly batch job, a schema migration run from the
+# pipeline, a stateful service on a managed EBS volume, a document renderer on
+# Managed Instances, and a log shipper on EC2 capacity.
 
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
-    aws = { source = "hashicorp/aws", version = ">= 5.100.0, < 7.0.0" }
+    aws = { source = "hashicorp/aws", version = ">= 6.57.1, < 7.0.0" }
   }
 }
 
@@ -38,6 +39,21 @@ variable "api_target_group_arn" {
   description = "Target group of the API's ALB listener."
   type        = string
   default     = "arn:aws:elasticloadbalancing:eu-west-2:111122223333:targetgroup/orders-api/0123456789abcdef"
+}
+
+variable "api_alternate_target_group_arn" {
+  description = "Second target group of the API, which ECS starts each new revision behind."
+  type        = string
+  default     = "arn:aws:elasticloadbalancing:eu-west-2:111122223333:targetgroup/orders-api-next/0123456789abcdef"
+}
+
+variable "api_listener_rule_arns" {
+  description = "The ALB listener rules ECS moves between the API's target groups: production, and the test rule that matches X-Release-Test."
+  type        = object({ production = string, test = string })
+  default = {
+    production = "arn:aws:elasticloadbalancing:eu-west-2:111122223333:listener-rule/app/orders/0123456789abcdef/0123456789abcdef/0123456789abcdef"
+    test       = "arn:aws:elasticloadbalancing:eu-west-2:111122223333:listener-rule/app/orders/0123456789abcdef/0123456789abcdef/fedcba9876543210"
+  }
 }
 
 variable "log_shipper_asg_arn" {
@@ -78,7 +94,24 @@ module "ecs" {
     }
   }
 
-  external_capacity_providers = ["orders-managed-instances"]
+  # Compute-optimized instances for the renderer, chosen and patched by AWS.
+  managed_instances_capacity_providers = {
+    compute = {
+      storage_size_gib = 60
+      instance_requirements = {
+        vcpu_min                                         = 2
+        vcpu_max                                         = 16
+        memory_mib_min                                   = 4096
+        cpu_manufacturers                                = ["amazon-web-services"]
+        allowed_instance_types                           = ["c7g.*", "c8g.*"]
+        burstable_performance                            = "excluded"
+        on_demand_max_price_percentage_over_lowest_price = 20
+      }
+    }
+  }
+
+  # GPU instances the platform team runs in its own Auto Scaling group.
+  external_capacity_providers = ["platform-gpu"]
 
   log_retention_days = 90
   log_kms_key_arn    = local.key
@@ -132,11 +165,33 @@ module "ecs" {
       volumes = {
         uploads = { efs = { file_system_id = "fs-0123456789abcdef0", access_point_id = "fsap-0123456789abcdef0" } }
       }
-      load_balancers = [{ target_group_arn = var.api_target_group_arn, container_name = "app" }]
+      load_balancers = [{
+        target_group_arn             = var.api_target_group_arn
+        container_name               = "app"
+        alternate_target_group_arn   = var.api_alternate_target_group_arn
+        production_listener_rule_arn = var.api_listener_rule_arns.production
+        test_listener_rule_arn       = var.api_listener_rule_arns.test
+      }]
       service_connect = {
-        expose = { http = { discovery_name = "orders-api", port = 80 } }
+        access_logs = { format = "JSON" }
+        expose      = { http = { discovery_name = "orders-api", port = 80, test_traffic_header = { name = "x-release-test", value = "1" } } }
       }
-      deployment = { minimum_healthy_percent = 100, maximum_percent = 200, alarm_names = ["orders-prod-api-5xx"] }
+      # 10% of traffic for 15 minutes, then the rest; the old revision stays
+      # 10 minutes more, and a smoke test must pass before production traffic.
+      deployment = {
+        strategy            = "CANARY"
+        canary_percent      = 10
+        canary_bake_minutes = 15
+        bake_time_minutes   = 10
+        alarm_names         = ["orders-prod-api-5xx"]
+        lifecycle_hooks = {
+          smoke = {
+            function_arn = "arn:aws:lambda:eu-west-2:111122223333:function:orders-smoke-test"
+            stages       = ["POST_TEST_TRAFFIC_SHIFT"]
+            details      = jsonencode({ path = "/health", header = "x-release-test" })
+          }
+        }
+      }
       autoscaling = {
         min                 = 2
         max                 = 20
@@ -228,6 +283,19 @@ module "ecs" {
       service_discovery = { namespace_id = "ns-abcdef0123456789" }
       alarms            = { min_running_tasks = 2 }
       deployment        = { minimum_healthy_percent = 50, maximum_percent = 100 }
+    }
+
+    # PDF rendering: CPU-heavy and bursty, packed onto Managed Instances.
+    renderer = {
+      launch           = "MANAGED_INSTANCES"
+      capacity         = "compute"
+      cpu_architecture = "ARM64" # compute allows only Graviton types
+      image            = "${local.ecr}/orders-renderer:1.4.2"
+      port             = 8080
+      cpu              = 2048
+      memory           = 4096
+      desired_count    = 2
+      service_connect  = {}
     }
 
     # One log shipper per EC2 container instance.

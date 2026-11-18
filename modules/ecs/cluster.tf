@@ -56,8 +56,8 @@ resource "aws_ecs_cluster" "this" {
     }
 
     precondition {
-      condition     = local.default_is_preset ? true : contains(concat(keys(var.ec2_capacity_providers), var.external_capacity_providers), var.default_capacity)
-      error_message = "default_capacity is \"${var.default_capacity}\", which is neither a preset (on_demand, balanced, spot_preferred, spot_only) nor an ec2_capacity_providers key or external_capacity_providers name."
+      condition     = local.default_is_preset ? true : contains(concat(keys(var.ec2_capacity_providers), keys(var.managed_instances_capacity_providers), var.external_capacity_providers), var.default_capacity)
+      error_message = "default_capacity is \"${var.default_capacity}\", which is neither a preset (on_demand, balanced, spot_preferred, spot_only) nor a capacity provider key or external_capacity_providers name."
     }
 
     precondition {
@@ -104,11 +104,101 @@ resource "aws_ecs_capacity_provider" "ec2" {
   tags = local.common_tags
 }
 
+# A Managed Instances provider belongs to the cluster it is created in, and is
+# still put on the cluster's provider list to be used.
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/getting-started-managed-instances-cli.html
+resource "aws_ecs_capacity_provider" "managed_instances" {
+  for_each = local.managed_instances
+
+  name    = local.mi_provider_name[each.key]
+  cluster = aws_ecs_cluster.this[0].name
+
+  managed_instances_provider {
+    infrastructure_role_arn = local.infrastructure_role_in_use
+    # The instances carry the tags, so their cost is attributable.
+    propagate_tags = "CAPACITY_PROVIDER"
+
+    dynamic "infrastructure_optimization" {
+      for_each = each.value.scale_in_after_seconds != null ? [each.value.scale_in_after_seconds] : []
+      content {
+        scale_in_after = infrastructure_optimization.value
+      }
+    }
+
+    instance_launch_template {
+      ec2_instance_profile_arn = each.value.instance_profile_arn != "" ? each.value.instance_profile_arn : aws_iam_instance_profile.instance[0].arn
+      capacity_option_type     = each.value.capacity_option_type
+      monitoring               = each.value.monitoring
+
+      network_configuration {
+        subnets         = length(each.value.subnet_ids) > 0 ? each.value.subnet_ids : var.subnet_ids
+        security_groups = length(each.value.security_group_ids) > 0 ? each.value.security_group_ids : var.security_group_ids
+      }
+
+      dynamic "storage_configuration" {
+        for_each = each.value.storage_size_gib > 0 ? [each.value.storage_size_gib] : []
+        content {
+          storage_size_gib = storage_configuration.value
+        }
+      }
+
+      dynamic "instance_requirements" {
+        for_each = each.value.instance_requirements.vcpu_min > 0 ? [each.value.instance_requirements] : []
+        content {
+          vcpu_count {
+            min = instance_requirements.value.vcpu_min
+            max = instance_requirements.value.vcpu_max == -1 ? null : instance_requirements.value.vcpu_max
+          }
+
+          memory_mib {
+            min = instance_requirements.value.memory_mib_min
+            max = instance_requirements.value.memory_mib_max == -1 ? null : instance_requirements.value.memory_mib_max
+          }
+
+          dynamic "accelerator_count" {
+            for_each = instance_requirements.value.accelerator_count_min + instance_requirements.value.accelerator_count_max > -2 ? [instance_requirements.value] : []
+            content {
+              min = accelerator_count.value.accelerator_count_min == -1 ? null : accelerator_count.value.accelerator_count_min
+              max = accelerator_count.value.accelerator_count_max == -1 ? null : accelerator_count.value.accelerator_count_max
+            }
+          }
+
+          cpu_manufacturers                                = length(instance_requirements.value.cpu_manufacturers) > 0 ? instance_requirements.value.cpu_manufacturers : null
+          instance_generations                             = length(instance_requirements.value.instance_generations) > 0 ? instance_requirements.value.instance_generations : null
+          burstable_performance                            = instance_requirements.value.burstable_performance
+          bare_metal                                       = instance_requirements.value.bare_metal
+          allowed_instance_types                           = length(instance_requirements.value.allowed_instance_types) > 0 ? instance_requirements.value.allowed_instance_types : null
+          excluded_instance_types                          = length(instance_requirements.value.excluded_instance_types) > 0 ? instance_requirements.value.excluded_instance_types : null
+          accelerator_types                                = length(instance_requirements.value.accelerator_types) > 0 ? instance_requirements.value.accelerator_types : null
+          accelerator_manufacturers                        = length(instance_requirements.value.accelerator_manufacturers) > 0 ? instance_requirements.value.accelerator_manufacturers : null
+          spot_max_price_percentage_over_lowest_price      = instance_requirements.value.spot_max_price_percentage_over_lowest_price == -1 ? null : instance_requirements.value.spot_max_price_percentage_over_lowest_price
+          on_demand_max_price_percentage_over_lowest_price = instance_requirements.value.on_demand_max_price_percentage_over_lowest_price == -1 ? null : instance_requirements.value.on_demand_max_price_percentage_over_lowest_price
+        }
+      }
+    }
+  }
+
+  tags = local.common_tags
+
+  lifecycle {
+    precondition {
+      condition     = length(each.value.subnet_ids) + length(var.subnet_ids) > 0
+      error_message = "managed_instances_capacity_providers.${each.key} has no subnets: set subnet_ids on it or on the module."
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.infrastructure,
+    aws_iam_role_policy.infrastructure_module,
+    aws_iam_role_policy_attachment.instance,
+  ]
+}
+
 resource "aws_ecs_cluster_capacity_providers" "this" {
   count = local.create ? 1 : 0
 
   cluster_name       = aws_ecs_cluster.this[0].name
-  capacity_providers = concat(["FARGATE", "FARGATE_SPOT"], [for k, p in aws_ecs_capacity_provider.ec2 : p.name], var.external_capacity_providers)
+  capacity_providers = concat(["FARGATE", "FARGATE_SPOT"], [for k, p in aws_ecs_capacity_provider.ec2 : p.name], [for k, p in aws_ecs_capacity_provider.managed_instances : p.name], var.external_capacity_providers)
 
   dynamic "default_capacity_provider_strategy" {
     for_each = local.cluster_default_strategy

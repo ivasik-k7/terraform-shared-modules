@@ -10,7 +10,7 @@ mock_provider "aws" {
     defaults = { partition = "aws" }
   }
   mock_data "aws_region" {
-    defaults = { endpoint = "ec2.eu-west-2.amazonaws.com" }
+    defaults = { region = "eu-west-2" }
   }
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111122223333" }
@@ -562,7 +562,7 @@ run "a_managed_ebs_volume_is_encrypted_tagged_and_attached_by_a_scoped_role" {
   }
 
   assert {
-    condition     = alltrue([length(aws_iam_role.infrastructure) == 1, aws_iam_role_policy_attachment.infrastructure[0].policy_arn == "arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRolePolicyForVolumes"])
+    condition     = alltrue([length(aws_iam_role.infrastructure) == 1, aws_iam_role_policy_attachment.infrastructure["volumes"].policy_arn == "arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRolePolicyForVolumes"])
     error_message = "the infrastructure role exists, with the AWS volumes policy, only because a service needs it."
   }
 }
