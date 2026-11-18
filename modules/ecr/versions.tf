@@ -1,15 +1,16 @@
 terraform {
-  # 1.5 floor kept for backward compatibility. moved blocks (>=1.1) and resource
-  # preconditions (>=1.2) used below are well within that.
-  required_version = ">= 1.5.0"
+  # 1.9: validations read other variables, and both operands of || and && are
+  # evaluated, so conditions use ternaries.
+  required_version = ">= 1.9.0"
 
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # tagPatternList lifecycle rules + enhanced registry scanning need a recent
-      # v5 provider; capped under 6 so a major bump can't surprise us. (~> 5.0
-      # previously; this only raises the floor, still v5.)
-      version = ">= 5.30.0, < 6.0.0"
+      # Tag mutability exclusions (6.8.0), archive lifecycle rules and
+      # CREATE_ON_PUSH templates (6.28.0), pull-time update exclusions
+      # (6.28.0) and BLOB_MOUNTING (6.29.0) are older than this floor.
+      # https://github.com/hashicorp/terraform-provider-aws/blob/v6.57.1/CHANGELOG.md
+      version = ">= 6.57.1, < 7.0.0"
     }
   }
 }

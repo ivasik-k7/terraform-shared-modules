@@ -1,575 +1,360 @@
-# plan-level checks, no creds. `terraform test`
-# mock_provider so the caller-identity / partition data sources resolve offline.
+# Properties of the repositories, one run per property. The baseline is fully
+# configured, so the module's own advisory checks pass.
+#
+# What a mock cannot show: ECR accepting a lifecycle policy or a repository
+# policy, or the replacement a change of encryption causes (mock_provider
+# never reports RequiresReplace).
 
 mock_provider "aws" {
-  mock_data "aws_caller_identity" {
-    defaults = { account_id = "123456789012" }
-  }
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
   }
-}
-
-# --- defaults: secure-by-default repo, no lifecycle policy (no rules) ---------
-run "basic_defaults" {
-  command = plan
-
-  variables {
-    repository_name = "platform/api"
+  mock_data "aws_region" {
+    defaults = { region = "eu-west-2" }
   }
-
-  assert {
-    condition     = length(aws_ecr_repository.this) == 1
-    error_message = "A repository should be planned"
-  }
-
-  assert {
-    condition     = aws_ecr_repository.this[0].image_tag_mutability == "IMMUTABLE"
-    error_message = "Tags should be immutable by default"
-  }
-
-  assert {
-    condition     = aws_ecr_repository.this[0].image_scanning_configuration[0].scan_on_push == true
-    error_message = "scan_on_push should default true"
-  }
-
-  assert {
-    condition     = aws_ecr_repository.this[0].encryption_configuration[0].encryption_type == "AES256"
-    error_message = "Encryption should default to AES256"
-  }
-
-  # the bug fix: enable_lifecycle_policy defaults true but with no rules we must
-  # NOT emit an empty (invalid) lifecycle policy.
-  assert {
-    condition     = length(aws_ecr_lifecycle_policy.this) == 0
-    error_message = "No lifecycle policy should be created when there are no rules"
-  }
-
-  # the secure baseline repository policy is created by default...
-  assert {
-    condition     = length(aws_ecr_repository_policy.this) == 1
-    error_message = "A repository policy should be created by default"
-  }
-
-  # ...and it must NOT contain destructive/admin actions (secure default).
-  assert {
-    condition     = !can(regex("ecr:DeleteRepository", aws_ecr_repository_policy.this[0].policy)) && !can(regex("ecr:SetRepositoryPolicy", aws_ecr_repository_policy.this[0].policy))
-    error_message = "The default baseline must not grant destructive/admin actions"
-  }
-
-  assert {
-    condition     = can(regex("ecr:PutImage", aws_ecr_repository_policy.this[0].policy))
-    error_message = "The default baseline should still allow account pull/push"
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "111122223333" }
   }
 }
 
-# --- custom statements layer ON TOP of the secure baseline -------------------
-run "statements_layered_on_baseline" {
-  command = plan
+variables {
+  name              = "platform"
+  kms_key_arn       = "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+  tags              = { CostCenter = "cc-1", Environment = "test" }
+  required_tag_keys = ["CostCenter"]
 
-  variables {
-    repository_name = "platform/api"
-    repository_policy_statements = [
-      {
-        sid    = "AllowOrgRead"
-        effect = "Allow"
-        principals = {
-          type        = "AWS"
-          identifiers = ["arn:aws:iam::555555555555:root"]
-        }
-        actions = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-      },
-    ]
-  }
-
-  # baseline (AllowAccountPullPush) + the custom statement both present
-  assert {
-    condition     = can(regex("AllowAccountPullPush", aws_ecr_repository_policy.this[0].policy)) && can(regex("AllowOrgRead", aws_ecr_repository_policy.this[0].policy))
-    error_message = "Custom statements must layer on top of the secure baseline, not replace it"
+  repositories = {
+    "orders/api" = {}
   }
 }
 
-# --- single-knob: repository_access with curated principals ------------------
-run "repository_access_principals" {
+# ---------------------------------------------------------------------------
+# Repository settings
+# ---------------------------------------------------------------------------
+
+run "a_repository_is_immutable_scanned_and_encrypted_by_default" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      aws_ecr_repository.this["orders/api"].name == "orders/api",
+      aws_ecr_repository.this["orders/api"].image_tag_mutability == "IMMUTABLE",
+      aws_ecr_repository.this["orders/api"].image_scanning_configuration[0].scan_on_push,
+      aws_ecr_repository.this["orders/api"].encryption_configuration[0].encryption_type == "KMS",
+      aws_ecr_repository.this["orders/api"].encryption_configuration[0].kms_key == "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555",
+      !aws_ecr_repository.this["orders/api"].force_delete,
+    ])
+    error_message = "the defaults are immutable tags, scan on push, the module's key, and no force_delete."
+  }
+}
+
+run "exclusions_turn_either_mode_into_its_with_exclusion_form" {
   command = plan
 
   variables {
-    repository_name = "platform/api"
-    repository_access = {
-      push_principals = ["arn:aws:iam::222222222222:role/ci-push"]
-      pull_principals = ["arn:aws:iam::333333333333:root"]
+    repositories = {
+      "orders/api"  = { tag_mutability_exclusions = ["latest", "dev-*"] }
+      "orders/base" = { image_tag_mutability = "MUTABLE", tag_mutability_exclusions = ["v*"] }
     }
+    acknowledged_checks = ["tags_are_immutable"]
   }
 
   assert {
-    condition     = length(aws_ecr_repository_policy.this) == 1
-    error_message = "repository_access principals should produce a policy"
-  }
-
-  assert {
-    condition     = can(regex("222222222222", aws_ecr_repository_policy.this[0].policy)) && can(regex("333333333333", aws_ecr_repository_policy.this[0].policy)) && can(regex("AllowAccountPullPush", aws_ecr_repository_policy.this[0].policy))
-    error_message = "Baseline + push + pull principals should all be present"
+    condition = alltrue([
+      aws_ecr_repository.this["orders/api"].image_tag_mutability == "IMMUTABLE_WITH_EXCLUSION",
+      [for f in aws_ecr_repository.this["orders/api"].image_tag_mutability_exclusion_filter : f.filter] == ["latest", "dev-*"],
+      alltrue([for f in aws_ecr_repository.this["orders/api"].image_tag_mutability_exclusion_filter : f.filter_type == "WILDCARD"]),
+      aws_ecr_repository.this["orders/base"].image_tag_mutability == "MUTABLE_WITH_EXCLUSION",
+    ])
+    error_message = "exclusions send IMMUTABLE_WITH_EXCLUSION or MUTABLE_WITH_EXCLUSION with WILDCARD filters, which is the only mode the provider accepts them in."
   }
 }
 
-# --- single-knob: baseline off + custom statement = full manual control ------
-run "repository_access_manual" {
+run "a_repository_key_wins_and_no_key_means_aes256" {
   command = plan
 
   variables {
-    repository_name = "platform/api"
-    repository_access = {
-      account_access = false
-      statements = [
+    repositories = {
+      "orders/api"    = { kms_key_arn = "arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555" }
+      "orders/public" = {}
+    }
+    kms_key_arn         = ""
+    acknowledged_checks = ["repositories_use_a_customer_key"]
+  }
+
+  assert {
+    condition = alltrue([
+      aws_ecr_repository.this["orders/api"].encryption_configuration[0].kms_key == "arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555",
+      aws_ecr_repository.this["orders/public"].encryption_configuration[0].encryption_type == "AES256",
+    ])
+    error_message = "a repository's own key is used; without any key, AES-256."
+  }
+
+  assert {
+    condition     = output.governance.encryption == { "orders/api" = "arn:aws:kms:eu-west-2:111122223333:key/99999999-2222-3333-4444-555555555555", "orders/public" = "AES256" }
+    error_message = "governance names each repository's encryption."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+run "the_default_lifecycle_expires_untagged_images_and_keeps_the_newest_hundred" {
+  command = plan
+
+  assert {
+    condition = jsondecode(aws_ecr_lifecycle_policy.this["orders/api"].policy) == {
+      rules = [
         {
-          sid    = "PullOnlyForBuildAccount"
-          effect = "Allow"
-          principals = {
-            type        = "AWS"
-            identifiers = ["arn:aws:iam::444444444444:role/deployer"]
-          }
-          actions = ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage", "ecr:BatchCheckLayerAvailability"]
+          rulePriority = 1
+          description  = "Expire untagged images 14 days after push"
+          selection    = { tagStatus = "untagged", countType = "sinceImagePushed", countUnit = "days", countNumber = 14 }
+          action       = { type = "expire" }
+        },
+        {
+          rulePriority = 3
+          description  = "Keep the newest 100 images"
+          selection    = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 100 }
+          action       = { type = "expire" }
         },
       ]
     }
-  }
-
-  assert {
-    condition     = can(regex("PullOnlyForBuildAccount", aws_ecr_repository_policy.this[0].policy)) && !can(regex("AllowAccountPullPush", aws_ecr_repository_policy.this[0].policy))
-    error_message = "account_access=false should leave only the user's statements"
+    error_message = "the preset bounds storage: untagged images go after 14 days, and only the newest 100 images stay; the any rule has the highest priority number."
   }
 }
 
-# --- single-knob: enabled=false -> no policy ---------------------------------
-run "repository_access_disabled" {
+run "the_archive_preset_moves_unpulled_images_and_deletes_old_archives" {
   command = plan
 
   variables {
-    repository_name   = "platform/api"
-    repository_access = { enabled = false }
+    lifecycle_policy = { keep_last = 0, archive_unpulled_days = 60, archive_expire_days = 365 }
   }
 
   assert {
-    condition     = length(aws_ecr_repository_policy.this) == 0
-    error_message = "repository_access.enabled=false should create no policy"
+    condition = [for r in jsondecode(aws_ecr_lifecycle_policy.this["orders/api"].policy).rules : [r.selection, r.action]] == [
+      [{ tagStatus = "untagged", countType = "sinceImagePushed", countUnit = "days", countNumber = 14 }, { type = "expire" }],
+      [{ tagStatus = "any", countType = "sinceImagePulled", countUnit = "days", countNumber = 60 }, { type = "transition", targetStorageClass = "archive" }],
+      [{ tagStatus = "any", storageClass = "archive", countType = "sinceImageTransitioned", countUnit = "days", countNumber = 365 }, { type = "expire" }],
+    ]
+    error_message = "archiving sends a transition on last pull and an expiry of archived images, in the shape of AWS's combined example."
   }
 }
 
-# --- F1: a "*" principal renders as {"AWS":["*"]}, not {"*":[...]} -----------
-run "public_principal_renders_aws_star" {
+run "a_repository_policy_replaces_the_modules_and_rules_replace_the_preset" {
   command = plan
 
   variables {
-    repository_name = "platform/public"
-    repository_access = {
-      account_access = false # so the ONLY principal is the public one
-      statements = [
-        {
-          sid        = "PublicPull"
-          effect     = "Allow"
-          principals = { type = "*", identifiers = ["*"] }
-          actions    = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-        },
-      ]
+    repositories = {
+      "orders/api" = {
+        lifecycle_policy = {
+          rules = [
+            { priority = 1, description = "Releases: keep 20", tag_status = "tagged", tag_patterns = ["v*"], count_type = "imageCountMoreThan", count = 20 },
+            { priority = 9, tag_status = "any", count_type = "sinceImagePushed", count = 30 },
+          ]
+        }
+      }
+      "orders/worker" = {}
     }
   }
 
-  # with the baseline off, "AWS" appears in the policy only if the public
-  # principal rendered correctly as {"AWS":["*"]} (the malformed {"*":[...]} omits it).
   assert {
-    condition     = can(regex("AWS", aws_ecr_repository_policy.this[0].policy))
-    error_message = "A '*' principal must render as {\"AWS\":[\"*\"]}"
-  }
-}
-
-# --- backward compat: deprecated flat inputs still merge in ------------------
-run "deprecated_inputs_still_honored" {
-  command = plan
-
-  variables {
-    repository_name    = "platform/api"
-    allowed_principals = ["arn:aws:iam::222222222222:role/legacy-ci"]
-  }
-
-  assert {
-    condition     = can(regex("222222222222", aws_ecr_repository_policy.this[0].policy))
-    error_message = "Deprecated allowed_principals must still be honored (merged into repository_access)"
-  }
-}
-
-# --- tags unify: tags wins over common_tags on conflict ----------------------
-run "tags_unified" {
-  command = plan
-
-  variables {
-    repository_name = "platform/api"
-    common_tags     = { Env = "old", Owner = "platform" }
-    tags            = { Env = "prod" }
-  }
-
-  assert {
-    condition     = aws_ecr_repository.this[0].tags["Env"] == "prod" && aws_ecr_repository.this[0].tags["Owner"] == "platform"
-    error_message = "tags should override common_tags on conflict and union the rest"
-  }
-}
-
-# --- lifecycle policy with rules ---------------------------------------------
-run "lifecycle_with_rules" {
-  command = plan
-
-  variables {
-    repository_name = "platform/api"
-    lifecycle_rules = [
-      {
-        rule_priority = 1
-        description   = "expire untagged after 14 days"
-        tag_status    = "untagged"
-        count_type    = "sinceImagePushed"
-        count_unit    = "days"
-        count_number  = 14
-        action_type   = "expire"
-      },
-      {
-        rule_priority = 2
-        description   = "keep last 20"
-        tag_status    = "any"
-        count_type    = "imageCountMoreThan"
-        count_number  = 20
-        action_type   = "expire"
-      },
+    condition = jsondecode(aws_ecr_lifecycle_policy.this["orders/api"].policy).rules == [
+      { rulePriority = 1, description = "Releases: keep 20", selection = { tagStatus = "tagged", countType = "imageCountMoreThan", countNumber = 20, tagPatternList = ["v*"] }, action = { type = "expire" } },
+      { rulePriority = 9, selection = { tagStatus = "any", countType = "sinceImagePushed", countNumber = 30, countUnit = "days" }, action = { type = "expire" } },
     ]
+    error_message = "rules are sent as written, with countUnit only on day counts and no empty description."
   }
 
   assert {
-    condition     = length(aws_ecr_lifecycle_policy.this) == 1
-    error_message = "A lifecycle policy should be created when rules are present"
-  }
-
-  assert {
-    condition     = can(regex("sinceImagePushed", aws_ecr_lifecycle_policy.this[0].policy))
-    error_message = "Lifecycle policy JSON should contain the rule selection"
+    condition     = length(jsondecode(aws_ecr_lifecycle_policy.this["orders/worker"].policy).rules) == 2
+    error_message = "a repository without its own policy keeps the module's."
   }
 }
 
-# --- tagPatternList support (previously declared but ignored) -----------------
-run "lifecycle_tag_pattern" {
+run "a_disabled_lifecycle_sends_no_policy" {
   command = plan
 
   variables {
-    repository_name = "platform/api"
-    lifecycle_rules = [
-      {
-        rule_priority    = 1
-        description      = "keep last 5 release images"
-        tag_status       = "tagged"
-        tag_pattern_list = ["v*"]
-        count_type       = "imageCountMoreThan"
-        count_number     = 5
-        action_type      = "expire"
-      },
-    ]
+    repositories        = { "orders/api" = { lifecycle_policy = { enabled = false } } }
+    acknowledged_checks = ["storage_is_bounded"]
   }
 
   assert {
-    condition     = can(regex("tagPatternList", aws_ecr_lifecycle_policy.this[0].policy))
-    error_message = "tagPatternList should be rendered into the lifecycle policy"
+    condition     = alltrue([length(aws_ecr_lifecycle_policy.this) == 0, jsonencode(output.governance.unbounded_storage) == jsonencode(["orders/api"])])
+    error_message = "enabled = false sends no policy, and governance lists the repository as unbounded."
   }
 }
 
-# --- KMS encryption -----------------------------------------------------------
-run "kms_encryption" {
+# ---------------------------------------------------------------------------
+# Access
+# ---------------------------------------------------------------------------
+
+run "no_repository_policy_without_access" {
   command = plan
-
-  variables {
-    repository_name = "platform/api"
-    encryption_type = "KMS"
-    kms_key_arn     = "arn:aws:kms:us-east-1:123456789012:key/abcd-ef01"
-  }
-
-  assert {
-    condition     = aws_ecr_repository.this[0].encryption_configuration[0].encryption_type == "KMS"
-    error_message = "Encryption type should be KMS"
-  }
-}
-
-# --- mutable tags + scanning off ---------------------------------------------
-run "mutable_tags" {
-  command = plan
-
-  variables {
-    repository_name      = "platform/api"
-    image_tag_mutability = "MUTABLE"
-    scan_on_push         = false
-  }
-
-  assert {
-    condition     = aws_ecr_repository.this[0].image_tag_mutability == "MUTABLE"
-    error_message = "Tags should be mutable when requested"
-  }
-}
-
-# --- cross-account access principals -> repository policy --------------------
-run "allowed_principals" {
-  command = plan
-
-  variables {
-    repository_name         = "platform/api"
-    allowed_principals      = ["arn:aws:iam::222222222222:role/ci-push"]
-    allowed_pull_principals = ["arn:aws:iam::333333333333:root"]
-  }
-
-  assert {
-    condition     = length(aws_ecr_repository_policy.this) == 1
-    error_message = "A repository policy should be planned for cross-account principals"
-  }
-
-  assert {
-    condition     = can(regex("222222222222", aws_ecr_repository_policy.this[0].policy))
-    error_message = "The push principal should appear in the policy"
-  }
-}
-
-# --- repository policy can be disabled ---------------------------------------
-run "no_repository_policy" {
-  command = plan
-
-  variables {
-    repository_name          = "platform/api"
-    create_repository_policy = false
-  }
 
   assert {
     condition     = length(aws_ecr_repository_policy.this) == 0
-    error_message = "No repository policy should be created when disabled"
+    error_message = "same-account access is IAM's; a repository with no access entries gets no policy."
   }
 }
 
-# --- least privilege: baseline off + nothing else -> no resource policy ------
-run "least_privilege_no_resource_policy" {
+run "access_entries_render_exactly_their_statements" {
   command = plan
 
   variables {
-    repository_name = "platform/api"
-    # no baseline, no principals, no statements -> no resource policy at all.
-    # access is then governed purely by identity policies (pull/push_policy_json).
-    repository_access = { account_access = false }
-  }
-
-  assert {
-    condition     = length(aws_ecr_repository_policy.this) == 0
-    error_message = "Baseline off with no principals/statements should produce no resource policy"
-  }
-}
-
-# --- a tightly-scoped custom resource policy (least privilege, cross-account) -
-run "custom_least_privilege_statement" {
-  command = plan
-
-  variables {
-    repository_name = "platform/api"
-    repository_policy_statements = [
-      {
-        sid    = "PullOnlyForBuildAccount"
-        effect = "Allow"
-        principals = {
-          type        = "AWS"
-          identifiers = ["arn:aws:iam::444444444444:role/deployer"]
+    repositories = {
+      "orders/api" = {
+        access = {
+          pull_principals       = ["arn:aws:iam::444455556666:root"]
+          push_principals       = ["arn:aws:iam::111122223333:role/ci"]
+          pull_organization_ids = ["o-abcdefghij"]
+          lambda_accounts       = ["444455556666"]
+          statements            = [jsonencode({ Sid = "Extra", Effect = "Deny", Principal = "*", Action = "ecr:DeleteRepository", Condition = { StringNotEquals = { "aws:PrincipalAccount" = "111122223333" } } })]
         }
-        actions = [
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage",
-          "ecr:BatchCheckLayerAvailability",
-        ]
-      },
-    ]
-  }
-
-  assert {
-    condition     = length(aws_ecr_repository_policy.this) == 1
-    error_message = "A custom least-privilege resource policy should be planned"
-  }
-
-  assert {
-    condition     = can(regex("PullOnlyForBuildAccount", aws_ecr_repository_policy.this[0].policy)) && !can(regex("ecr:DeleteRepository", aws_ecr_repository_policy.this[0].policy))
-    error_message = "Only the scoped pull statement should be present (no broad delete grant)"
-  }
-}
-
-# --- replication --------------------------------------------------------------
-run "replication" {
-  command = plan
-
-  variables {
-    repository_name    = "platform/api"
-    enable_replication = true
-    replication_rules = [
-      {
-        destinations = [{ region = "eu-west-1", registry_id = "123456789012" }]
-      },
-    ]
-  }
-
-  assert {
-    condition     = length(aws_ecr_replication_configuration.this) == 1
-    error_message = "A replication configuration should be planned"
-  }
-}
-
-# --- pull-through cache -------------------------------------------------------
-run "pull_through_cache" {
-  command = plan
-
-  variables {
-    repository_name = "platform/api"
-    pull_through_cache_rules = {
-      dockerhub = {
-        ecr_repository_prefix = "docker-hub"
-        upstream_registry_url = "registry-1.docker.io"
       }
     }
   }
 
   assert {
-    condition     = length(aws_ecr_pull_through_cache_rule.this) == 1
-    error_message = "A pull-through cache rule should be planned"
-  }
-}
-
-# --- create = false builds nothing -------------------------------------------
-run "create_false" {
-  command = plan
-
-  variables {
-    create          = false
-    repository_name = "platform/api"
+    condition = jsondecode(aws_ecr_repository_policy.this["orders/api"].policy).Statement == [
+      { Sid = "Pull", Effect = "Allow", Principal = { AWS = ["arn:aws:iam::444455556666:root"] }, Action = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"] },
+      { Sid = "PullAndPush", Effect = "Allow", Principal = { AWS = ["arn:aws:iam::111122223333:role/ci"] }, Action = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:CompleteLayerUpload", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart"] },
+      { Sid = "PullFromOrganizations", Effect = "Allow", Principal = "*", Action = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"], Condition = { StringEquals = { "aws:PrincipalOrgID" = ["o-abcdefghij"] } } },
+      { Sid = "LambdaAccountsPull", Effect = "Allow", Principal = { AWS = ["arn:aws:iam::444455556666:root"] }, Action = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"] },
+      { Sid = "LambdaImageRetrieval", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"], Condition = { ArnLike = { "aws:sourceARN" = ["arn:aws:lambda:eu-west-2:444455556666:function:*"] } } },
+      { Sid = "Extra", Effect = "Deny", Principal = "*", Action = "ecr:DeleteRepository", Condition = { StringNotEquals = { "aws:PrincipalAccount" = "111122223333" } } },
+    ]
+    error_message = "each access entry renders one statement: pull and push to the named principals, organization pull scoped by aws:PrincipalOrgID, the two statements Lambda needs, and the caller's own."
   }
 
   assert {
-    condition     = length(aws_ecr_repository.this) == 0 && length(aws_ecr_repository_policy.this) == 0
-    error_message = "create=false should build nothing"
+    condition     = jsonencode(output.governance.cross_account_principals) == jsonencode(["orders/api: arn:aws:iam::444455556666:root"])
+    error_message = "governance lists principals from other accounts."
   }
 }
 
-# ============================================================================
-# VALIDATION / PRECONDITION FAILURES
-# ============================================================================
-
-run "invalid_name_uppercase_fails" {
+run "consumer_policies_name_exactly_these_repositories" {
   command = plan
+
   variables {
-    repository_name = "Platform/API"
+    repositories = { "orders/api" = {}, "orders/worker" = {} }
   }
-  expect_failures = [var.repository_name]
-}
 
-run "short_name_fails" {
-  command = plan
-  variables {
-    repository_name = "a"
-  }
-  expect_failures = [var.repository_name]
-}
-
-run "kms_without_key_fails" {
-  command = plan
-  variables {
-    repository_name = "platform/api"
-    encryption_type = "KMS"
-    # kms_key_arn omitted -> precondition fails
-  }
-  expect_failures = [aws_ecr_repository.this]
-}
-
-run "bad_lifecycle_action_fails" {
-  command = plan
-  variables {
-    repository_name = "platform/api"
-    lifecycle_rules = [
-      { rule_priority = 1, description = "x", tag_status = "untagged", count_type = "sinceImagePushed", count_number = 14, action_type = "delete" },
+  assert {
+    condition = jsondecode(output.pull_policy_json).Statement == [
+      { Sid = "PullImages", Effect = "Allow", Action = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"], Resource = ["arn:aws:ecr:eu-west-2:111122223333:repository/orders/api", "arn:aws:ecr:eu-west-2:111122223333:repository/orders/worker"] },
+      { Sid = "GetAuthorizationToken", Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = "*" },
     ]
+    error_message = "the pull policy scopes the pull actions to the module's repositories; only the token is *."
   }
-  expect_failures = [var.lifecycle_rules]
+
+  assert {
+    condition     = contains(jsondecode(output.push_policy_json).Statement[0].Action, "ecr:PutImage") && output.pull_through_cache_policy_json == null
+    error_message = "the push policy adds the push actions; there is no cache policy without a cache."
+  }
 }
 
-run "bad_lifecycle_tag_status_fails" {
+# ---------------------------------------------------------------------------
+# Contracts and signals
+# ---------------------------------------------------------------------------
+
+run "every_kms_requirement_is_contract_v2" {
   command = plan
-  variables {
-    repository_name = "platform/api"
-    lifecycle_rules = [
-      { rule_priority = 1, description = "x", tag_status = "weird", count_type = "imageCountMoreThan", count_number = 5, action_type = "expire" },
-    ]
+
+  assert {
+    condition = output.kms_key_policy_requirements == [{
+      key        = "arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+      sid        = "RepositoryGrants0"
+      principals = { services = [], arns = [], roles = ["deployer"] }
+      actions    = ["kms:CreateGrant", "kms:DescribeKey"]
+      conditions = [{ test = "StringEquals", variable = "kms:ViaService", values = ["ecr.eu-west-2.amazonaws.com"] }]
+      purpose    = output.kms_key_policy_requirements[0].purpose
+    }]
+    error_message = "the repository key admits the deployer to create grants through ECR in this Region, and nothing else."
   }
-  expect_failures = [var.lifecycle_rules]
+
+  assert {
+    condition     = jsondecode(output.deployer_requirements.iam_policy).Statement == [{ Sid = "RetireRepositoryKeyGrants", Effect = "Allow", Action = ["kms:RetireGrant"], Resource = ["arn:aws:kms:eu-west-2:111122223333:key/11111111-2222-3333-4444-555555555555"] }]
+    error_message = "the deployer holds kms:RetireGrant in its own policy, which ECR requires, and needs nothing else for repositories alone."
+  }
 }
 
-run "duplicate_priority_fails" {
+run "the_network_contract_names_the_ecr_endpoints_and_s3" {
   command = plan
-  variables {
-    repository_name = "platform/api"
-    lifecycle_rules = [
-      { rule_priority = 1, description = "a", tag_status = "untagged", count_type = "imageCountMoreThan", count_number = 5, action_type = "expire" },
-      { rule_priority = 1, description = "b", tag_status = "any", count_type = "imageCountMoreThan", count_number = 9, action_type = "expire" },
-    ]
+
+  assert {
+    condition = alltrue([
+      output.network_contract.required_interface_endpoints == ["com.amazonaws.eu-west-2.ecr.api", "com.amazonaws.eu-west-2.ecr.dkr"],
+      output.network_contract.gateway_endpoints == ["com.amazonaws.eu-west-2.s3"],
+    ])
+    error_message = "pulls need ecr.api, ecr.dkr and the S3 gateway endpoint."
   }
-  expect_failures = [var.lifecycle_rules]
 }
 
-run "tagged_without_filter_fails" {
+run "critical_findings_reach_the_topic" {
   command = plan
+
   variables {
-    repository_name = "platform/api"
-    lifecycle_rules = [
-      { rule_priority = 1, description = "x", tag_status = "tagged", count_type = "imageCountMoreThan", count_number = 5, action_type = "expire" },
-    ]
+    sns_topic_arn = "arn:aws:sns:eu-west-2:111122223333:alerts"
   }
-  expect_failures = [var.lifecycle_rules]
+
+  assert {
+    condition = alltrue([
+      aws_cloudwatch_event_rule.this["critical-findings"].name == "platform-ecr-critical-findings",
+      jsondecode(aws_cloudwatch_event_rule.this["critical-findings"].event_pattern).detail == { "repository-name" = ["orders/api"], "finding-severity-counts" = { CRITICAL = [{ numeric = [">", 0] }] } },
+      aws_cloudwatch_event_target.this["critical-findings"].arn == "arn:aws:sns:eu-west-2:111122223333:alerts",
+      length(aws_cloudwatch_event_rule.this) == 1,
+    ])
+    error_message = "a basic scan with critical findings in the module's repositories publishes to the topic; registry rules need the registry."
+  }
+
+  assert {
+    condition     = output.notification_requirements.topic_policy_statements[0].Condition == { ArnLike = { "aws:SourceArn" = "arn:aws:events:eu-west-2:111122223333:rule/platform-ecr-*" } }
+    error_message = "the topic policy admits only this module's rules."
+  }
 }
 
-run "replication_without_rules_fails" {
+run "module_tags_cannot_be_overridden" {
   command = plan
+
   variables {
-    repository_name    = "platform/api"
-    enable_replication = true
-    replication_rules  = []
+    tags         = { CostCenter = "cc-1", ManagedBy = "someone", Module = "other" }
+    repositories = { "orders/api" = { tags = { Team = "orders", Module = "again" } } }
   }
-  expect_failures = [aws_ecr_replication_configuration.this]
+
+  assert {
+    condition     = aws_ecr_repository.this["orders/api"].tags == tomap({ CostCenter = "cc-1", Team = "orders", ManagedBy = "Terraform", Module = "ecr" })
+    error_message = "repository tags merge the module's, the repository's and the module keys last."
+  }
 }
 
-run "registry_policy_without_json_fails" {
+run "create_false_plans_nothing_and_outputs_nothing" {
   command = plan
-  variables {
-    repository_name        = "platform/api"
-    enable_registry_policy = true
-    # registry_policy_json omitted
-  }
-  expect_failures = [aws_ecr_registry_policy.this]
-}
 
-run "bad_statement_effect_fails" {
-  command = plan
   variables {
-    repository_name = "platform/api"
-    repository_policy_statements = [
-      { sid = "x", effect = "Permit", actions = ["ecr:BatchGetImage"] },
-    ]
+    create        = false
+    sns_topic_arn = "arn:aws:sns:eu-west-2:111122223333:alerts"
+    registry      = { enabled = true, scanning = {}, replication = [{ destinations = [{ region = "eu-west-1" }] }] }
   }
-  expect_failures = [var.repository_policy_statements]
-}
 
-run "empty_actions_fails" {
-  command = plan
-  variables {
-    repository_name   = "platform/api"
-    repository_access = { statements = [{ sid = "x", actions = [] }] }
+  assert {
+    condition = alltrue([
+      length(aws_ecr_repository.this) == 0, length(aws_ecr_lifecycle_policy.this) == 0, length(aws_ecr_repository_policy.this) == 0,
+      length(aws_ecr_registry_scanning_configuration.this) == 0, length(aws_ecr_replication_configuration.this) == 0,
+      length(aws_cloudwatch_event_rule.this) == 0, length(aws_iam_role.templates) == 0,
+    ])
+    error_message = "create = false creates nothing."
   }
-  expect_failures = [var.repository_access]
-}
 
-run "non_ecr_action_fails" {
-  command = plan
-  variables {
-    repository_name   = "platform/api"
-    repository_access = { statements = [{ sid = "x", actions = ["s3:GetObject"] }] }
+  assert {
+    condition = alltrue([
+      output.repository_arns == {}, output.repository_urls == {}, output.registry_url == null, output.registry_id == null,
+      output.pull_policy_json == null, output.push_policy_json == null, output.governance == null,
+      output.kms_key_policy_requirements == null, output.deployer_requirements == null, output.network_contract == null,
+      output.notification_requirements == null, output.verify_commands == null, output.replication_destination_requirements == {},
+      output.creation_template_role_arn == null,
+    ])
+    error_message = "create = false leaves every output null or empty."
   }
-  expect_failures = [var.repository_access]
 }
