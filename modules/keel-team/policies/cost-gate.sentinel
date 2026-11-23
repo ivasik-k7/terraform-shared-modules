@@ -1,0 +1,26 @@
+# Keel cost gate: a run whose estimated monthly cost increase is above the
+# team's limit fails. Set as soft-mandatory, so the cost owner can override,
+# and the override is the evidence.
+#
+# Parameters, per policy set (from keel-team's output.plan_gate):
+#   max_monthly_increase   the most a single run may add to the monthly bill
+#
+# Cost estimation must be on for the organization. Plan-time estimates cover
+# provisioned resources; usage-priced services (tokens, data transfer) are
+# Keel's meters' job.
+# https://developer.hashicorp.com/terraform/cloud-docs/policy-enforcement/import-reference/tfrun
+# https://developer.hashicorp.com/sentinel/docs/imports/decimal
+
+import "tfrun"
+import "decimal"
+
+param max_monthly_increase default 0
+
+delta = decimal.new(tfrun.cost_estimate.delta_monthly_cost)
+
+print("Estimated monthly change:", tfrun.cost_estimate.delta_monthly_cost,
+	"; limit for one run:", max_monthly_increase)
+
+main = rule {
+	delta.less_than_or_equals(max_monthly_increase)
+}

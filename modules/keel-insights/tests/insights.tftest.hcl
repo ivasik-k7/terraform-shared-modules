@@ -1,0 +1,92 @@
+# Plan properties of keel-insights.
+#
+# What a mock cannot show: the CID templates deploying, Quick Sight accepting
+# the user, or data arriving in the bucket.
+
+mock_provider "aws" {
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+  mock_data "aws_region" {
+    defaults = { region = "eu-west-2" }
+  }
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "333333333333" }
+  }
+}
+
+variables {
+  data_exports = { source_account_ids = ["444444444444"] }
+  quicksight   = { user = "finops-admin", subscription_ready = true }
+}
+
+run "the_templates_are_aws_published_versions" {
+  command = plan
+
+  assert {
+    condition     = aws_cloudformation_stack.data_exports_destination[0].template_url == "https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn/data-exports/0.13.0/data-exports-aggregation.yaml"
+    error_message = "the data pipeline comes from AWS's published template, pinned."
+  }
+
+  assert {
+    condition     = aws_cloudformation_stack.dashboards[0].parameters["CURVersion"] == "2.0" && aws_cloudformation_stack.dashboards[0].parameters["DeployCUDOSv5"] == "yes"
+    error_message = "the dashboards read CUR 2.0 and CUDOS v5 is on by default."
+  }
+
+  assert {
+    condition     = output.data_bucket == "cid-333333333333-data-exports"
+    error_message = "the bucket name is the template's: <prefix>-<account>-data-exports."
+  }
+}
+
+run "plugins_deploy_one_after_another_in_a_fixed_order" {
+  command = plan
+
+  variables {
+    dashboards = { plugins = ["cora", "focus-dashboard", "trends-dashboard"] }
+  }
+
+  assert {
+    condition     = aws_cloudformation_stack.plugin_1[0].parameters["DashboardId"] == "trends-dashboard" && aws_cloudformation_stack.plugin_3[0].parameters["DashboardId"] == "cora"
+    error_message = "plugins follow AWS's order, whatever order they are listed in."
+  }
+
+  assert {
+    condition     = length(aws_cloudformation_stack.plugin_4) == 0
+    error_message = "only the requested plugins deploy."
+  }
+}
+
+run "dashboards_without_quicksight_are_refused" {
+  # cid-cfn.yml accepts only "yes" for its prerequisite parameters.
+  command = plan
+
+  variables {
+    quicksight = { user = "finops-admin" }
+  }
+
+  expect_failures = [aws_cloudformation_stack.dashboards]
+}
+
+run "a_dashboard_without_its_table_warns" {
+  command = plan
+
+  variables {
+    data_exports = { source_account_ids = ["444444444444"], focus = false }
+  }
+
+  expect_failures = [check.dashboards_have_their_data]
+}
+
+run "create_false_plans_nothing" {
+  command = plan
+
+  variables {
+    create = false
+  }
+
+  assert {
+    condition     = length(aws_cloudformation_stack.dashboards) == 0 && output.data_bucket == null && length(output.stacks) == 0 && output.governance == null
+    error_message = "create = false creates nothing."
+  }
+}
