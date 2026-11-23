@@ -1,0 +1,174 @@
+name: gitlab-runner-job-host
+description: >-
+  Prepares an Amazon Linux 2023 image to be a docker-autoscaler job instance:
+  Docker enabled, ec2-user in the docker group (the runner manager reaches Docker
+  as that user over SSH), the ECS agent of an ECS-optimized parent turned off,
+  container logs bounded, and optionally the helper image pre-pulled so no job
+  waits for it. Holds no credentials and no runner configuration.
+schemaVersion: 1.0
+
+parameters:
+  - HelperImage:
+      type: string
+      description: >-
+        gitlab-runner-helper image to pre-pull, e.g.
+        111122223333.dkr.ecr.eu-west-1.amazonaws.com/ci/gitlab-runner-helper:x86_64-v18.6.1.
+        Empty skips it. An ECR image is pulled with the build instance's role,
+        which needs ecr:GetAuthorizationToken and pull rights on the repository.
+      default: ""
+  - RegistryMirror:
+      type: string
+      description: >-
+        Docker Hub pull-through mirror (https://host[:port]), written to
+        daemon.json as registry-mirrors, so job images named like alpine:3.20
+        resolve without Docker Hub. Use a mirror served at a host's root (a
+        subdomain or port per repository), not under a path. Empty leaves
+        Docker Hub as is.
+      default: ""
+  - LogMaxSize:
+      type: string
+      description: Per-container log file cap, e.g. 50m.
+      default: 50m
+
+phases:
+  - name: build
+    steps:
+      - name: InstallDocker
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              # The ECS-optimized AMI ships Docker; a plain AL2023 parent does not.
+              command -v docker >/dev/null || dnf install -y docker
+
+      - name: ConfigureDaemon
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              mirror='{{ RegistryMirror }}'
+              case "$mirror" in
+                ""|https://*) : ;;
+                *) echo "FATAL: RegistryMirror must be empty or https://..., got '$mirror'" >&2; exit 1 ;;
+              esac
+              install -d -m 0755 /etc/docker
+              # Merged into what the parent image has; the test phase proves the
+              # daemon still starts with it.
+              python3 - "$mirror" '{{ LogMaxSize }}' <<'PY'
+              import json, os, sys
+              mirror, size = sys.argv[1], sys.argv[2]
+              path = "/etc/docker/daemon.json"
+              config = json.load(open(path)) if os.path.exists(path) else {}
+              config.setdefault("log-driver", "json-file")
+              if config["log-driver"] == "json-file":
+                  config["log-opts"] = {**config.get("log-opts", {}), "max-size": size, "max-file": "3"}
+              config["live-restore"] = False
+              if mirror:
+                  config["registry-mirrors"] = [mirror]
+              with open(path, "w") as f:
+                  json.dump(config, f, indent=2)
+              PY
+              chmod 0644 /etc/docker/daemon.json
+
+      - name: DockerForEc2User
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              usermod -aG docker ec2-user
+              systemctl enable docker
+
+      - name: EcsAgentOff
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              if systemctl list-unit-files ecs.service >/dev/null 2>&1; then
+                systemctl disable ecs.service || true
+              fi
+
+      - name: PrePullHelper
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              image='{{ HelperImage }}'
+              [ -n "$image" ] || exit 0
+              systemctl start docker
+              registry="${image%%/*}"
+              case "$registry" in
+                *.dkr.ecr.*.amazonaws.com)
+                  command -v aws >/dev/null || dnf install -y awscli-2
+                  region="$(echo "$registry" | cut -d. -f4)"
+                  aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry"
+                  ;;
+              esac
+              docker pull "$image"
+              docker logout "$registry" >/dev/null 2>&1 || true
+              rm -f /root/.docker/config.json
+
+      - name: Cleanup
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              dnf clean all
+              rm -rf /var/cache/dnf
+
+  - name: test
+    steps:
+      - name: DockerAnswersEc2User
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              systemctl start docker
+              for _ in $(seq 1 30); do
+                if sudo -u ec2-user sg docker -c 'docker info' >/dev/null 2>&1; then exit 0; fi
+                sleep 2
+              done
+              echo "FATAL: ec2-user cannot reach Docker" >&2
+              exit 1
+
+      - name: EnabledOnBootAndEcsOff
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              systemctl is-enabled docker | grep -qx enabled
+              # set -e ignores a command negated with !, so this is an explicit if.
+              if systemctl is-enabled ecs.service >/dev/null 2>&1; then
+                echo "FATAL: the ECS agent still starts at boot" >&2
+                exit 1
+              fi
+
+      - name: HelperIsPresent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              image='{{ HelperImage }}'
+              [ -z "$image" ] || docker image inspect "$image" >/dev/null
+
+      - name: NoRegistryCredentialsBakedIn
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              for f in /root/.docker/config.json /home/*/.docker/config.json; do
+                [ -e "$f" ] || continue
+                if grep -q '"auth"' "$f"; then
+                  echo "FATAL: registry credentials baked into $f" >&2
+                  exit 1
+                fi
+              done

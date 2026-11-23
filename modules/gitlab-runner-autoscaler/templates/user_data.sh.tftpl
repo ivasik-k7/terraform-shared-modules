@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
+# The ECS agent of the ECS-optimized AMI is not used: jobs run on Docker directly.
+# Starting or stopping a unit from cloud-final must not block on it.
+systemctl disable --now --no-block ecs.service || true
+
+# The runner manager reaches Docker through an SSH session as ec2-user.
+usermod -aG docker ec2-user
+
+%{ if registry_mirror != "" ~}
+# Docker Hub images resolve through the mirror; other daemon settings are kept.
+python3 - <<'PY'
+import json, os
+path = "/etc/docker/daemon.json"
+config = json.load(open(path)) if os.path.exists(path) else {}
+config["registry-mirrors"] = [${jsonencode(registry_mirror)}]
+os.makedirs("/etc/docker", exist_ok=True)
+with open(path, "w") as f:
+    json.dump(config, f, indent=2)
+PY
+systemctl enable --no-block docker.service
+systemctl restart --no-block docker.service
+%{ else ~}
+systemctl enable --now --no-block docker.service
+%{ endif ~}

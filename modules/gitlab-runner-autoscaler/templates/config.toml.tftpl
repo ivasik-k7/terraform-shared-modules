@@ -1,0 +1,68 @@
+concurrent = ${concurrent}
+check_interval = 3
+shutdown_timeout = 110
+log_format = "json"
+%{ if listen_address != "" ~}
+listen_address = ${jsonencode(listen_address)}
+%{ endif ~}
+
+[[runners]]
+  name = ${jsonencode(name)}
+  url = ${jsonencode(gitlab_url)}
+  token = "__RUNNER_TOKEN__"
+  executor = "docker-autoscaler"
+  limit = ${concurrent}
+  environment = ${jsonencode(environment)}
+%{ if tls_ca_file != "" ~}
+  tls-ca-file = ${jsonencode(tls_ca_file)}
+%{ endif ~}
+
+%{ if cache != null ~}
+  [runners.cache]
+    Type = "s3"
+    Path = ${jsonencode(cache.path)}
+    Shared = true
+%{ if cache.max_archive_bytes > 0 ~}
+    MaxUploadedArchiveSize = ${cache.max_archive_bytes}
+%{ endif ~}
+    [runners.cache.s3]
+      AuthenticationType = "iam"
+      BucketName = ${jsonencode(cache.bucket)}
+      BucketLocation = ${jsonencode(cache.region)}
+      DualStack = false
+
+%{ endif ~}
+  [runners.docker]
+    image = ${jsonencode(job_image)}
+    helper_image = ${jsonencode(helper_image)}
+    pull_policy = ["if-not-present"]
+    privileged = ${privileged}
+    volumes = ${jsonencode(volumes)}
+
+  [runners.autoscaler]
+    plugin = "fleeting-plugin-aws"
+    capacity_per_instance = ${capacity_per_instance}
+    max_use_count = ${max_use_count}
+    max_instances = ${max_instances}
+    instance_ready_command = ${jsonencode(instance_ready_command)}
+    delete_instances_on_shutdown = true
+
+    [runners.autoscaler.plugin_config]
+      name = ${jsonencode(autoscaling_group_name)}
+      region = ${jsonencode(region)}
+
+    [runners.autoscaler.connector_config]
+      username = "ec2-user"
+      use_static_credentials = true
+      key_path = ${jsonencode(key_path)}
+      use_external_addr = false
+%{ for p in policies ~}
+
+    [[runners.autoscaler.policy]]
+      periods = ${jsonencode(p.periods)}
+      timezone = ${jsonencode(p.timezone)}
+      idle_count = ${p.idle_count}
+      idle_time = ${jsonencode(p.idle_time)}
+      scale_factor = ${replace(format("%f", p.scale_factor), "/0+$/", "")}0
+      scale_factor_limit = ${p.scale_factor_limit}
+%{ endfor ~}
