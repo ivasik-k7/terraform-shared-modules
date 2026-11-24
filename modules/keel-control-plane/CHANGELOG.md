@@ -11,6 +11,9 @@ All notable changes to this module. The format is
 
 - An event bus for the organization's cost signals, with an archive.
 - Routing to INFO, WARNING, HIGH and CRITICAL topics: anomalies by impact,
-  alarms by name, Keel events by their declared severity.
+  alarms by name, `keel-signals` events by their source, Keel events by their
+  declared severity.
+- A bus policy admitting the organization's `keel-signals` forwarding roles
+  only (`sources.principal_arn_patterns`).
 - Evidence: every event to an Object Lock bucket through Data Firehose.
 - Alarms on undelivered signals and failed evidence delivery.

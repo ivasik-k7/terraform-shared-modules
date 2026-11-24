@@ -60,7 +60,10 @@ resource "aws_cloudwatch_event_bus_policy" "this" {
         Principal = "*"
         Action    = "events:PutEvents"
         Resource  = aws_cloudwatch_event_bus.this[0].arn
-        Condition = { StringEquals = { "aws:PrincipalOrgID" = var.sources.organization_id } }
+        Condition = {
+          StringEquals = { "aws:PrincipalOrgID" = var.sources.organization_id }
+          ArnLike      = { "aws:PrincipalArn" = var.sources.principal_arn_patterns }
+        }
       }],
       length(var.sources.account_ids) == 0 ? [] : [{
         Sid       = "Accounts"
@@ -68,6 +71,7 @@ resource "aws_cloudwatch_event_bus_policy" "this" {
         Principal = { AWS = [for a in var.sources.account_ids : "arn:${local.partition}:iam::${a}:root"] }
         Action    = "events:PutEvents"
         Resource  = aws_cloudwatch_event_bus.this[0].arn
+        Condition = { ArnLike = { "aws:PrincipalArn" = var.sources.principal_arn_patterns } }
       }],
     )
   })
@@ -265,8 +269,8 @@ resource "aws_cloudwatch_event_target" "keel" {
 }
 
 # keel-signals moves what reaches an account's severity topics (budgets, limit
-# anomalies, alarms) here as source keel.<severity>; the SNS message is the
-# body of the SQS record the pipe carries.
+# anomalies, alarms) here as source keel.<severity>, with the SNS envelope in
+# detail.sns.
 resource "aws_cloudwatch_event_rule" "signal" {
   for_each = local.create ? toset(local.severities) : toset([])
 
@@ -289,8 +293,8 @@ resource "aws_cloudwatch_event_target" "signal" {
 
   input_transformer {
     input_paths = {
-      subject = "$.detail.body.Subject"
-      message = "$.detail.body.Message"
+      subject = "$.detail.sns.Subject"
+      message = "$.detail.sns.Message"
       account = "$.account"
       region  = "$.region"
     }

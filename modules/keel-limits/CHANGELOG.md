@@ -18,5 +18,9 @@ Entries marked **BREAKING** change what an unchanged caller's plan does.
 - Thresholds that alert by severity on keel-signals' topics, with defaults by
   tier.
 - A per-limit anomaly monitor on the limit's scope.
-- Per-limit actions: a deny policy on roles, or an SCP, automatic or manual.
+- Per-limit actions: a deny policy on roles at any IAM path, or an SCP,
+  automatic or manual.
+- Plan-time refusals for what AWS refuses at apply: a notification without a
+  subscriber, a cost category monitor on several values, a commitment scope
+  the budget cannot filter on.
 - `thresholds`, `controls` and `governance` as data.

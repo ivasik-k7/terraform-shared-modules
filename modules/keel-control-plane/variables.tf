@@ -12,8 +12,8 @@ variable "name" {
   nullable    = false
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,20}$", var.name))
-    error_message = "name must be 2-21 characters: lowercase letters, digits and hyphens, starting with a letter."
+    condition     = can(regex("^[a-z][a-z0-9-]{1,18}$", var.name))
+    error_message = "name must be 2-19 characters (the Firehose role's name prefix, <name>-evidence-firehose-, may be 38): lowercase letters, digits and hyphens, starting with a letter."
   }
 }
 
@@ -68,10 +68,14 @@ variable "sources" {
   description = <<-EOT
     Who may put events on the bus: every account of an organization, listed accounts, or both. keel-signals forwards
     with a role from each account and Region (keel-billing's anomalies, every account's severity topics).
+      principal_arn_patterns   the roles allowed to put events: by default keel-signals' forwarding roles. Anyone else
+                               in the organization could otherwise page CRITICAL and write a record the evidence lock
+                               keeps for years
   EOT
   type = object({
-    organization_id = optional(string, "")
-    account_ids     = optional(list(string), [])
+    organization_id        = optional(string, "")
+    account_ids            = optional(list(string), [])
+    principal_arn_patterns = optional(list(string), ["arn:*:iam::*:role/*-signal-forward-*"])
   })
   nullable = false
 
@@ -80,8 +84,10 @@ variable "sources" {
       var.sources.organization_id == "" ? true : can(regex("^o-[a-z0-9]{10,32}$", var.sources.organization_id)),
       alltrue([for a in var.sources.account_ids : can(regex("^[0-9]{12}$", a))]),
       var.sources.organization_id != "" ? true : length(var.sources.account_ids) > 0,
+      length(var.sources.principal_arn_patterns) > 0,
+      alltrue([for p in var.sources.principal_arn_patterns : startswith(p, "arn:")]),
     ])
-    error_message = "sources: an organization_id (o-...) or one or more 12-digit account_ids."
+    error_message = "sources: an organization_id (o-...) or one or more 12-digit account_ids; one or more principal_arn_patterns (ARN patterns)."
   }
 }
 

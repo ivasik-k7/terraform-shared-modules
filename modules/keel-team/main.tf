@@ -36,6 +36,11 @@ locals {
   # budget (FC-01).
   account_limits = sort([for k, l in local.caller_limits : k if try(l.type, "COST") == "COST" ? alltrue([for f, v in try(l.scope, {}) : f == "accounts" ? true : length(v) == 0]) : false])
   account_limit  = length(local.account_limits) > 0 ? local.caller_limits[local.account_limits[0]] : null
+  account_limit_amount = local.account_limit == null ? null : (
+    try(local.account_limit.auto_adjust_months, 0) > 0 ? null : (
+      try(local.account_limit.period, "MONTHLY") != "MONTHLY" ? null : try(tonumber(local.account_limit.amount), null)
+    )
+  )
 }
 
 # ---------------------------------------------------------------------------

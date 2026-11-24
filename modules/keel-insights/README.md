@@ -29,7 +29,7 @@ data should live in. Then give each management account's `keel-billing` the
 | Terraform | `>= 1.9.0` |
 | hashicorp/aws | `>= 6.57.1, < 7.0.0` |
 | Quick Sight | Enterprise subscription in this account and region, at least 10 GB of SPICE, access to S3 and Athena, and a user |
-| Lake Formation | Off, or `data_exports.lake_formation = true` |
+| Lake Formation | Off, or `data_exports.lake_formation = true` with AWS's CID Lake Formation prerequisite stack deployed first (the dashboards template imports `cid-LakeFormation-TagKey`) |
 | Deployer | Broad: the templates create IAM roles, buckets, Glue, Athena, Lambda and Quick Sight assets (`deployer_requirements`) |
 
 ## What the module refuses
@@ -51,6 +51,25 @@ data should live in. Then give each management account's `keel-billing` the
 - **Plugins deploy one after another** in a fixed order, as AWS's own Terraform
   does: in parallel they conflict over shared Quick Sight assets.
 - **Template versions are pinned** and must match `keel-billing`'s.
+- **The templates run with `CAPABILITY_NAMED_IAM`.** AWS's copies sit at
+  versioned paths that a later upload can overwrite, and CloudFormation reads
+  the URL again on every stack update. For production, mirror the reviewed
+  files into a versioned bucket the estate controls:
+  1. Compare each file with its reviewed hash (`templates`,
+     `verify_commands.template_*`).
+  2. Copy it to the same layout under your prefix (`data-exports/<version>/`,
+     `<version>/`). Copy the dashboards' Lambda layer to the bucket
+     `<lambda_layer_bucket_prefix>-<region>`, key
+     `cid-resource-lambda-layer/cid-<version>.zip`.
+  3. Set `templates`. `source_requirements` passes the prefix on to
+     `keel-billing`.
+
+  For a private mirror the check commands need `aws s3 cp … -` in place of
+  `curl`.
+- **The export data is kept.** The template's bucket rules expire only
+  noncurrent versions, and the module adds none: billing history is evidence.
+  `verify_commands.export_data_size` shows the growth. Hourly granularity is
+  AWS's recommendation below a $50M invoice.
 - **Data arrives within a day** of the source side's first apply; history needs
   a backfill request to AWS Data Exports.
 
@@ -67,6 +86,8 @@ data should live in. Then give each management account's `keel-billing` the
 
 ## Limits
 
+- **Mirroring is not exercised.** That CloudFormation and the layer read from
+  a caller's bucket as they do from AWS's is unverified.
 - **Never applied against real AWS.** The templates and their parameters are
   read in source; deployment is not tested.
 - Quick Sight seats and the subscription are outside the module.

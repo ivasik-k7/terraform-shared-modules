@@ -26,5 +26,7 @@ Entries marked **BREAKING** change what an unchanged caller's plan does.
 - Running-hours schedules: EventBridge Scheduler and Systems Manager
   Automation stop and start EC2 instances by tag and RDS instances by
   identifier.
-- A FinOps read-only role trusted by the FinOps account.
+- A FinOps read-only role trusted by the FinOps account: cost and named
+  metadata actions, none returning configuration or secrets.
+- `cost_gate`: `plan_gate.max_monthly_increase` for the Sentinel policy.
 - `policies/cost-gate.sentinel` for an HCP Terraform policy set.

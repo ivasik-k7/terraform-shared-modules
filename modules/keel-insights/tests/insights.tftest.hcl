@@ -39,6 +39,53 @@ run "the_templates_are_aws_published_versions" {
   }
 }
 
+run "the_default_templates_carry_their_reviewed_hashes" {
+  command = plan
+
+  assert {
+    condition     = output.templates.dashboards.reviewed_sha256 == "4ff3367615fe05dea571a0c4960d446a9e6f395c311b0d0fffc487b99422d455" ? strcontains(output.verify_commands.template_dashboards, "echo reviewed") : false
+    error_message = "the reviewed cid-cfn 4.4.21 hash is emitted, and the check command compares against it."
+  }
+
+  assert {
+    condition     = aws_cloudformation_stack.dashboards[0].parameters["LambdaLayerBucketPrefix"] == "aws-managed-cost-intelligence-dashboards"
+    error_message = "the Lambda layer comes from AWS's bucket by default."
+  }
+}
+
+run "a_mirror_serves_the_templates_and_the_lambda_layer" {
+  # The templates run with CAPABILITY_NAMED_IAM; a mirror the estate controls
+  # keeps a re-upload at AWS's path from changing what a stack update runs.
+  command = plan
+
+  variables {
+    templates = { url_prefix = "https://cid-mirror.s3.eu-west-2.amazonaws.com/cfn", lambda_layer_bucket_prefix = "cid-mirror-layers" }
+  }
+
+  assert {
+    condition     = aws_cloudformation_stack.dashboards[0].template_url == "https://cid-mirror.s3.eu-west-2.amazonaws.com/cfn/4.4.21/cid-cfn.yml" ? aws_cloudformation_stack.dashboards[0].parameters["LambdaLayerBucketPrefix"] == "cid-mirror-layers" : false
+    error_message = "the dashboards template and its layer come from the mirror."
+  }
+
+  assert {
+    condition     = output.source_requirements.template_url_prefix == "https://cid-mirror.s3.eu-west-2.amazonaws.com/cfn"
+    error_message = "keel-billing is told to use the same mirror."
+  }
+}
+
+run "an_unreviewed_version_has_no_hash_to_compare" {
+  command = plan
+
+  variables {
+    dashboards = { version = "4.4.99" }
+  }
+
+  assert {
+    condition     = output.templates.dashboards.reviewed_sha256 == null ? strcontains(output.verify_commands.template_dashboards, "unreviewed") : false
+    error_message = "a version nobody reviewed says so instead of claiming a match."
+  }
+}
+
 run "plugins_deploy_one_after_another_in_a_fixed_order" {
   command = plan
 

@@ -98,11 +98,11 @@ variable "data_exports" {
       length(var.data_exports.source_account_ids) > 0,
       alltrue([for a in var.data_exports.source_account_ids : can(regex("^[0-9]{12}$", a))]),
       can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.data_exports.version)),
-      can(regex("^[a-z0-9][a-z0-9-]{0,20}$", var.data_exports.resource_prefix)),
+      can(regex("^[a-z0-9][a-z0-9-]{1,35}[a-z0-9]$", var.data_exports.resource_prefix)),
       contains(["HOURLY", "DAILY", "MONTHLY"], var.data_exports.cur2_granularity),
       contains(["HOURLY", "DAILY", "MONTHLY"], var.data_exports.focus_granularity),
     ])
-    error_message = "data_exports: one or more 12-digit source_account_ids; version x.y.z; resource_prefix lowercase; granularities HOURLY, DAILY or MONTHLY."
+    error_message = "data_exports: one or more 12-digit source_account_ids; version x.y.z; resource_prefix 3-37 lowercase letters, digits and hyphens, not ending in a hyphen (the template's pattern); granularities HOURLY, DAILY or MONTHLY."
   }
 }
 
@@ -143,6 +143,32 @@ variable "quicksight" {
   validation {
     condition     = var.quicksight.user != "" ? can(regex("^[A-Za-z0-9+=,.@_/-]{1,128}$", var.quicksight.data_source_role)) : false
     error_message = "quicksight: user is required; data_source_role must be an IAM role name."
+  }
+}
+
+variable "templates" {
+  description = <<-EOT
+    Where the CID CloudFormation templates come from. They run with CAPABILITY_NAMED_IAM, and AWS's copies sit at
+    versioned paths a later upload can overwrite, so a production estate mirrors the reviewed files into a bucket it
+    controls (output.templates has each file's reviewed sha256).
+      url_prefix                   replaces https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn;
+                                   the same layout below it: data-exports/<version>/..., <version>/cid-cfn.yml
+      lambda_layer_bucket_prefix   the dashboards template's Lambda layer comes from <prefix>-<region>, key
+                                   cid-resource-lambda-layer/cid-<version>.zip, unless this is AWS's own bucket name
+  EOT
+  type = object({
+    url_prefix                 = optional(string, "https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn")
+    lambda_layer_bucket_prefix = optional(string, "aws-managed-cost-intelligence-dashboards")
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition = alltrue([
+      can(regex("^https://[^\\s]+[^/]$", var.templates.url_prefix)),
+      can(regex("^[a-z0-9][a-z0-9.-]{1,46}$", var.templates.lambda_layer_bucket_prefix)),
+    ])
+    error_message = "templates: url_prefix an https URL without a trailing slash; lambda_layer_bucket_prefix an S3 bucket name prefix of 2-47 characters (the Region is appended)."
   }
 }
 

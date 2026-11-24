@@ -205,8 +205,9 @@ variable "limits" {
       l.type == "USAGE" ? length(l.scope.usage_types) + length(l.scope.usage_type_groups) > 0 : true,
       startswith(l.type, "RI_") ? length(l.scope.services) == 1 : true,
       startswith(l.type, "SAVINGS_PLANS") || startswith(l.type, "RI_") ? (l.action == null ? l.anomaly == null : false) : true,
+      contains(["COST", "USAGE"], l.type) ? true : length(l.scope.tags) + length(l.scope.cost_categories) + length(l.scope.regions) + length(l.scope.usage_types) + length(l.scope.usage_type_groups) == 0,
     ])])
-    error_message = "limits: USAGE needs usage_types or usage_type_groups; RI types need exactly one service; commitment limits take no action and no anomaly monitor."
+    error_message = "limits: USAGE needs usage_types or usage_type_groups; RI types need exactly one service; commitment limits take no action and no anomaly monitor, and a scope of services and accounts only (a commitment budget filters on nothing else)."
   }
 
   validation {

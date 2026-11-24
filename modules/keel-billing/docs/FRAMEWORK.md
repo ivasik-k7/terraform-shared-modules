@@ -31,7 +31,7 @@ changing the insight layer later loses no data.
 | L3 Signals | Severity topics per account and Region, forwarded to the control plane | `keel-signals` | Every account and Region with signals | Built |
 | L4 Control plane | Event bus, severity routing, evidence store | `keel-control-plane` | FinOps, home Region | Built |
 | L5 Actuators | Locks and SCPs at a limit, running hours for non-production | `keel-limits` (actions), `keel-team` (schedules) | Team, management | Built |
-| Assistant | AWS FinOps Agent, organization-wide | `keel-billing` (`finops_agent`) | Management, delegated to FinOps; us-east-1 | Built (preview service) |
+| Assistant | AWS FinOps Agent, organization-wide | `keel-billing` (`finops_agent`: the decision and its setup as data) | Management, delegated to FinOps; us-east-1 | Set up from the agent's console (preview service) |
 
 Every alert travels the same way: a threshold publishes to a severity topic
 (`keel-signals`), the topic's pipe puts it on the account's default bus as
@@ -63,7 +63,7 @@ and sandboxes may lock automatically.
 
 | Module | Region | Why |
 |---|---|---|
-| `keel-billing` | **us-east-1** | Billing, Budgets, Cost Explorer and Data Exports APIs, Cost Anomaly Detection's events, and FinOps Agent are there |
+| `keel-billing` | **us-east-1**; its CID source stack in **London** (`data_exports.region`) | Billing, Budgets, Cost Explorer and Data Exports APIs, Cost Anomaly Detection's events, and FinOps Agent are there; the CID template delivers exports to the bucket in its own Region |
 | `keel-guardrails` | Any (Organizations is global); run it with `keel-billing` | |
 | `keel-control-plane`, `keel-insights` | The FinOps account's home Region, **London (eu-west-2)** | Evidence, dashboards and the people reading them stay in the UK |
 | `keel-team` | Once per account in its home Region (`components` default), then once per other Region with `{ account = false }`: **London and Ireland (eu-west-1)** | Budgets are global; topics, alarms, Bedrock profiles, quotas, invocation logs and schedules are regional |
@@ -76,25 +76,32 @@ What crosses Regions, and what it carries:
 | us-east-1 (management) → London (control plane) | Budget and anomaly signals: amounts, account IDs, tag values |
 | Ireland → London | The same for Ireland's alarms |
 | AWS billing metadata | Processed in us-east-1 for every customer, whatever Keel does |
-| FinOps Agent | The organization's cost and resource data, stored in us-east-1, inference in the US |
+| FinOps Agent | Every account's cost, resource and operational data, to an agent running in us-east-1 |
 
 ## AWS FinOps Agent
 
-FinOps Agent is in preview in **us-east-1 only**. It answers cost questions and
-investigates anomalies across the organization. It reads through a
-service-linked role (`AWSServiceRoleForFinOpsAgent`) that SCPs do not restrict,
-keeps its data in us-east-1 and runs inference within the US geography. Keel
-does not change any of that. It gives three decisions their place in code:
+FinOps Agent is in preview, and its organization setup and organization-wide
+agents run in **us-east-1**. It answers cost questions and investigates
+anomalies across the organization, through a service-linked role
+(`AWSServiceRoleForFinOpsAgent`) that SCPs do not restrict. That role reads
+every member account's cost, usage and resource data, CloudTrail events and
+CloudWatch metrics. Everyone who can use the organization-wide agent reads
+all of it, and no account can be excluded.
+
+Its organization access is turned on from its console; trusted access in AWS
+Organizations alone does not complete it. So Keel does not turn it on. It
+gives the decisions their place in code:
 
 | Decision | Where |
 |---|---|
-| Turn it on, administered from the FinOps account | `keel-billing`'s `finops_agent` (trusted access, delegated administrator) |
-| Accept that its data leaves the UK and EU | `finops_agent_data_stays_in_the_us`: warns until acknowledged, so the approval is in the configuration |
+| Use it, administered from the FinOps account | `keel-billing`'s `finops_agent`, which emits `finops_agent_setup`: the console steps, the delegation, the IAM policy the person needs |
+| Accept what it reads, and where it runs | `finops_agent_is_approved`: warns until acknowledged, so the approval is in the configuration |
 | Keep AWS from using the organization's content to improve the service | `keel-guardrails`' `ai_services_opt_out` |
 
-London and Ireland workloads need nothing else. The agent reads the
-organization's billing data, which is already in us-east-1, and creates its own
-EventBridge rule for anomaly events. Until the data-residency approval exists,
+London and Ireland workloads need nothing else: the agent reads the
+organization's billing data and creates its own EventBridge rule for anomaly
+events. Where it stores data and where inference runs are not stated on the
+pages read for this framework (RESEARCH.md 10.1). Until the approval exists,
 Keel without the agent covers the same ground, more slowly: CID dashboards in
 London and anomalies on the control plane.
 
@@ -128,8 +135,8 @@ Management account, us-east-1                FinOps account, London             
    Ireland with `components = { account = false }`.
 6. **HCP Terraform.** Turn on cost estimation, add `cost-gate.sentinel` to a
    policy set as soft-mandatory, with each team's limit from `plan_gate`.
-7. **FinOps Agent**, once the data-residency approval exists:
-   `finops_agent.enabled` in step 3, acknowledged.
+7. **FinOps Agent**, once its access is approved: `finops_agent.enabled` in
+   step 3, acknowledged, then `finops_agent_setup`'s steps in the console.
 
 ## The controls register
 

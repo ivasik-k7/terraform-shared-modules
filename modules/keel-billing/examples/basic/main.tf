@@ -23,8 +23,7 @@ module "billing" {
   }
 
   anomaly_detection = {
-    cost_categories = ["Team"]
-    alert           = { emails = ["finops@example.com"] }
+    alert = { emails = ["finops@example.com"] }
   }
 
   limits = {

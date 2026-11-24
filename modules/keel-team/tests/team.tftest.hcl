@@ -19,16 +19,20 @@ mock_provider "aws" {
     defaults = { quota_code = "L-AAAAAAAA", quota_name = "Tokens per minute", value = 200000 }
   }
   mock_resource "aws_sns_topic" {
-    defaults = { arn = "arn:aws:sns:eu-west-2:111111111111:lending-mock" }
+    override_during = plan
+    defaults        = { arn = "arn:aws:sns:eu-west-2:111111111111:lending-mock" }
   }
   mock_resource "aws_iam_role" {
-    defaults = { arn = "arn:aws:iam::111111111111:role/mock" }
+    override_during = plan
+    defaults        = { arn = "arn:aws:iam::111111111111:role/mock" }
   }
   mock_resource "aws_iam_policy" {
-    defaults = { arn = "arn:aws:iam::111111111111:policy/mock" }
+    override_during = plan
+    defaults        = { arn = "arn:aws:iam::111111111111:policy/mock" }
   }
   mock_resource "aws_sqs_queue" {
-    defaults = { arn = "arn:aws:sqs:eu-west-2:111111111111:mock", url = "https://sqs.eu-west-2.amazonaws.com/111111111111/mock" }
+    override_during = plan
+    defaults        = { arn = "arn:aws:sqs:eu-west-2:111111111111:mock", url = "https://sqs.eu-west-2.amazonaws.com/111111111111/mock" }
   }
 }
 
@@ -113,8 +117,8 @@ run "each_ai_application_gets_a_tagged_profile_and_a_cap" {
   }
 
   assert {
-    condition     = jsonencode(module.limits.thresholds["ai-assistant"]) == jsonencode(["actual 50%: WARNING", "actual 80%: WARNING", "actual 90%: WARNING", "actual 100%: HIGH"])
-    error_message = "the cap alerts at 50, 80, 90 and 100% of actual spend, HIGH at the cap."
+    condition     = jsonencode(module.limits.thresholds["ai-assistant"]) == jsonencode(["actual 50%: WARNING", "actual 80%: WARNING", "actual 90%: WARNING", "actual 100%: CRITICAL"])
+    error_message = "the cap alerts at 50, 80, 90 and 100% of actual spend; in a sandbox the cap is CRITICAL."
   }
 }
 
@@ -170,18 +174,36 @@ run "schedules_stop_and_start_by_tag_and_by_instance" {
   }
 
   assert {
-    condition     = jsondecode(aws_scheduler_schedule.this["office-hours-ec2-stop"].target[0].input).Targets[0].Key == "tag:Schedule" && jsondecode(aws_scheduler_schedule.this["office-hours-ec2-stop"].target[0].input).DocumentName == "AWS-StopEC2Instance"
+    condition     = jsondecode(aws_scheduler_schedule.this["office-hours/ec2/stop"].target[0].input).Targets[0].Key == "tag:Schedule" && jsondecode(aws_scheduler_schedule.this["office-hours/ec2/stop"].target[0].input).DocumentName == "AWS-StopEC2Instance"
     error_message = "EC2 instances are selected by their tag and stopped by the AWS runbook."
   }
 
   assert {
-    condition     = jsonencode(jsondecode(aws_scheduler_schedule.this["office-hours-lending-dev-stop"].target[0].input).Parameters.InstanceId) == jsonencode(["lending-dev"])
+    condition     = jsonencode(jsondecode(aws_scheduler_schedule.this["office-hours/rds/lending-dev/stop"].target[0].input).Parameters.InstanceId) == jsonencode(["lending-dev"])
     error_message = "an RDS instance is stopped by its identifier."
   }
 
   assert {
-    condition     = aws_scheduler_schedule.this["office-hours-ec2-stop"].schedule_expression_timezone == "Europe/London"
+    condition     = aws_scheduler_schedule.this["office-hours/ec2/stop"].schedule_expression_timezone == "Europe/London"
     error_message = "schedules run in the team's time zone."
+  }
+}
+
+run "schedules_that_differ_only_in_where_a_hyphen_falls_stay_apart" {
+  # dev + db-orders and dev-db + orders once produced one key, and one of the
+  # instances was silently never stopped.
+  command = plan
+
+  variables {
+    schedules = {
+      dev    = { rds_instances = ["db-orders"], stop = "cron(0 19 ? * MON-FRI *)", start = "cron(0 8 ? * MON-FRI *)" }
+      dev-db = { rds_instances = ["orders"], stop = "cron(0 19 ? * MON-FRI *)", start = "cron(0 8 ? * MON-FRI *)" }
+    }
+  }
+
+  assert {
+    condition     = length(aws_scheduler_schedule.this) == 4 ? length(distinct([for x in aws_scheduler_schedule.this : x.name])) == 4 : false
+    error_message = "each instance keeps its own stop and start schedule."
   }
 }
 
@@ -203,8 +225,14 @@ run "the_finops_role_is_trusted_by_the_finops_account_only" {
   }
 
   assert {
-    condition     = !strcontains(aws_iam_role_policy.finops_read[0].policy, "s3:GetObject") && !strcontains(aws_iam_role_policy.finops_read[0].policy, "s3:ListBucket\"")
-    error_message = "the FinOps role reads no data."
+    # These return object contents, user data, task environments and function
+    # environment variables: secrets, in practice.
+    condition = alltrue([for a in [
+      "s3:GetObject", "s3:ListBucket\"", "ec2:Describe*", "ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions",
+      "autoscaling:Describe*", "autoscaling:DescribeLaunchConfigurations", "ecs:Describe*", "ecs:DescribeTaskDefinition",
+      "ecs:DescribeTasks", "lambda:", "secretsmanager:", "ssm:GetParameter", "logs:GetLogEvents", "logs:FilterLogEvents",
+    ] : !strcontains(aws_iam_role_policy.finops_read[0].policy, a)])
+    error_message = "the FinOps role reads no data, configuration or secrets."
   }
 }
 
@@ -272,9 +300,44 @@ run "plan_gate_takes_the_account_limit" {
   command = plan
 
   assert {
-    condition     = output.plan_gate.monthly_budget == 8500 && output.plan_gate.tier == "sandbox"
-    error_message = "the cost gate compares runs against the account limit."
+    condition     = output.plan_gate.max_monthly_increase == 850 ? output.plan_gate.tier == "sandbox" : false
+    error_message = "one run may add 10% of the account limit: the parameter the policy reads."
   }
+}
+
+run "an_auto_adjusting_account_limit_plans_without_a_gate" {
+  # The gate once read the limit's amount, which an auto-adjusting limit does
+  # not have, and the plan failed.
+  command = plan
+
+  variables {
+    limits = { account = { auto_adjust_months = 6, action = { lock_roles = ["developer"] } } }
+  }
+
+  assert {
+    condition     = output.plan_gate == null ? contains(keys(output.controls), "FC-01") : false
+    error_message = "no gate without an amount, and FC-01 still describes the limit."
+  }
+}
+
+run "inference_profiles_carry_names_and_descriptions_bedrock_accepts" {
+  command = plan
+
+  assert {
+    condition     = can(regex("^([0-9a-zA-Z:.][ _-]?)+$", aws_bedrock_inference_profile.this["assistant/sonnet"].description)) ? can(regex("^([0-9a-zA-Z][ _-]?)+$", aws_bedrock_inference_profile.this["assistant/sonnet"].name)) : false
+    error_message = "the description and name match CreateInferenceProfile's patterns."
+  }
+}
+
+run "a_profile_name_over_64_characters_is_rejected" {
+  command = plan
+
+  variables {
+    ai   = { applications = { a-very-long-application-name-x = { models = { a-long-model-alias = "arn:aws:bedrock:eu-west-2::foundation-model/example.model-a" }, monthly_cap = 1 } } }
+    team = "a-rather-long-team-name"
+  }
+
+  expect_failures = [var.ai]
 }
 
 run "more_than_five_priced_models_are_rejected" {

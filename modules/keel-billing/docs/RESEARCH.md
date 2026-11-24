@@ -114,12 +114,13 @@ v1.53.0, bcmdataexports v1.18.0); CID data collection `main` at `77be83f`
 
 | # | Finding | Mark | Source |
 |---|---|---|---|
-| 10.1 | AWS FinOps Agent is in preview in us-east-1 only. Its data is stored in us-east-1, and it uses cross-Region inference within the US geography. | Docs | finops-agent user guide, what-is.html; What's New, June 2026 |
-| 10.2 | Organization access is through the service-linked role `AWSServiceRoleForFinOpsAgent`, which SCPs do not restrict; one delegated administrator; service principal `finops-agent.amazonaws.com`. | Docs | finops-agent user guide |
+| 10.1 | AWS FinOps Agent is in preview; "organization setup and organization-wide agents run" in US East (N. Virginia). Where it stores data and where inference runs is not stated on what-is.html or the organization access page. | Docs + **Unverified** (storage and inference location) | setting-up-organization-access.html; find the data-location statement before a residency approval |
+| 10.2 | Organization access is through the service-linked role `AWSServiceRoleForFinOpsAgent`, which SCPs do not restrict; it "reads cost, usage, and resource data in each member account, including AWS CloudTrail events, Amazon CloudWatch metrics, and CloudWatch Logs configuration"; "Everyone who can use an organization-wide agent can read data for every member account"; accounts cannot be excluded. | Docs | setting-up-organization-access.html |
+| 10.2a | "Turning on trusted access directly in AWS Organizations does not complete AWS FinOps Agent organization setup." The console's setup needs `finops-agent:GetOrganizationAccess`, `finops-agent:UpdateOrganizationAccess`, `organizations:EnableAWSServiceAccess` (condition on the service principal) and `iam:CreateServiceLinkedRole`. | Docs | setting-up-organization-access.html |
 | 10.3 | The agent creates its own EventBridge rule for anomaly events. | Docs | finops-agent user guide |
 | 10.4 | AWS AI services opt-out: `{"services":{"default":{"opt_out_policy":{"@@assign":"optOut"}}}}`, at most 2,500 characters. | Docs | Organizations guide, orgs_manage_policies_ai-opt-out_syntax.html; Organizations quotas |
 | 10.5 | `aws_organizations_aws_service_access` and `aws_billing_view` exist at 6.57.1. AWS recommends enabling trusted access through the service's own console or API, and the resource fights `aws_service_access_principals` on the organization resource. | Docs | provider docs at 6.57.1 |
-| 10.6 | Enabling FinOps Agent trusted access by API, then delegating, is equivalent to the console's setup. | **Unverified** | Enable in a sandbox organization; compare with the console path |
+| 10.6 | Registering the agent's delegated administrator by `organizations register-delegated-administrator` after the console setup is accepted. | **Unverified** | The first registration; `list-delegated-administrators` |
 | 10.7 | A billing view's `data_filter_expression` takes `dimensions` with key `LINKED_ACCOUNT`, or `tags`; `source_views` names the views it derives from. | Docs | provider docs, `aws_billing_view` at 6.57.1 |
 | 10.8 | Billing views are shared through AWS RAM, and an account they are shared with reads them in Cost Explorer. | **Unverified** | Share a view with the FinOps account; open Cost Explorer there |
 
@@ -136,6 +137,36 @@ v1.53.0, bcmdataexports v1.18.0); CID data collection `main` at `77be83f`
 | 11.7 | `AWS-StopRdsInstance` and `AWS-StartRdsInstance` take `InstanceId` ("ID of the Amazon RDS instance") and `AutomationAssumeRole`. | Docs | Automation runbook reference |
 | 11.8 | The caller of a tag-targeted automation needs `tag:GetResources`; the scheduler and automation roles carry it. | **Unverified** (neither page lists caller permissions) | The first scheduled run; CloudTrail |
 | 11.9 | RDS starts a stopped DB instance after seven days. | **Unverified** (not re-read) | RDS guide, "Stopping a DB instance" |
+
+## Audit of 24 November 2026
+
+| # | Finding | Mark | Source |
+|---|---|---|---|
+| 12.1 | "If an Amazon SQS message doesn't satisfy your filter criteria, EventBridge automatically removes the message from the queue." Pipes sharing a queue lose each other's messages. | Docs | eb-pipes-event-filtering.html |
+| 12.2 | A pipe's input transformer parses a JSON SQS `body`; string variables are quoted by Pipes; extracted values are not escaped, so an object (`<$.body>`) is inserted unquoted; a missing path becomes an empty string. | Docs | eb-pipes-input-transformation.html |
+| 12.3 | AWS managed monitors: AWS services per account, 1; additional ones (linked account, cost allocation tag, or cost category) per management account, 1; in total per management account, 2. Customer managed monitors track up to 10 linked accounts or tag values, and 1 cost category value. | Docs | management-limits.html |
+| 12.4 | Whether a management account already holds an automatically created AWS services monitor, which would leave room for none. | **Unverified** | `aws ce get-anomaly-monitors` in the management account |
+| 12.5 | The CID data exports template sets each export's `S3Region: !Ref AWS::Region` and delivers to `<prefix>-<destination>-data-exports`; its `ResourcePrefix` is `^[a-z0-9]+[a-z0-9-]{1,61}[a-z0-9]+$`, MaxLength 37; the bucket's lifecycle expires noncurrent versions only. | Source | data-exports-aggregation.yaml 0.13.0, lines 82-83, 314-323, 789-924 |
+| 12.6 | `aws_cloudformation_stack` takes `region` at 6.57.1 and later. | Source | provider schema |
+| 12.7 | CreateInferenceProfile: name `([0-9a-zA-Z][ _-]?)+`, at most 64; description `([0-9a-zA-Z:.][ _-]?)+`, at most 200. | Docs | API_CreateInferenceProfile.html |
+| 12.8 | `lambda:GetFunctionConfiguration` returns "The function's environment variables". | Docs | API_GetFunctionConfiguration.html |
+| 12.9 | AWS's budget action role example trusts `budgets.amazonaws.com` with `aws:SourceAccount` and `aws:SourceArn` `arn:aws:budgets::<account>:budget/*`. | Docs | billing-example-policies.html |
+| 12.10 | A budget notification needs 1 to 11 subscribers (one SNS, ten e-mail). | Docs | API_budgets_NotificationWithSubscribers.html |
+| 12.11 | Notifications per budget: CreateBudget says "up to five notifications", its array allows 10. | **Unverified** | A budget with six notifications |
+| 12.12 | USAGE and commitment budgets "do not have CostTypes" (API reference); the provider's example sets them on commitment budgets. | **Unverified** | Create a commitment budget in a sandbox |
+| 12.13 | Tag policy: the policy key "must match the value for the tag key, except for the case treatment". | Docs | orgs_manage_policies_example-tag-policies.html |
+| 12.14 | Scheduler schedule names: `[0-9a-zA-Z-_.]+`, at most 64. | Docs | API_CreateSchedule.html |
+| 12.16 | The provider refuses `monitor_dimension` with `monitor_specification` ("conflicts with"), so it cannot declare the TAG or COST_CATEGORY managed monitors the API defines with a key (1.2); `keel-billing` watches cost category values with customer managed monitors instead. | Source | `terraform test` at aws 6.73.0: `"monitor_dimension": conflicts with monitor_specification`; provider docs at 6.57.1 give no keyed dimensional example |
+| 12.15 | A cross-account `PutEvents` from a rule's target role carries that role's ARN in `aws:PrincipalArn`, so the control plane's bus policy can admit keel-signals' roles only. | **Unverified** | The first signal from a member account; a denied PutEvents in CloudTrail if not |
+
+## CID templates, reviewed
+
+| # | Finding | Mark | Source |
+|---|---|---|---|
+| 13.1 | sha256 of the reviewed copies, fetched from `https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn/` on 24 November 2026: `data-exports/0.13.0/data-exports-aggregation.yaml` 1eba08e62689ecc5feb81ce452e6216ad736897c6d66510be605e5da02855009; `4.4.21/cid-cfn.yml` 4ff3367615fe05dea571a0c4960d446a9e6f395c311b0d0fffc487b99422d455; `4.4.21/cid-plugin.yml` c130bbb1f75ee23b2d71d34f1ede5d8f94f4e286cd7f12cc5388a40c0b91f2c5. | Source | `sha256sum` of the downloaded files |
+| 13.2 | `cid-cfn.yml` takes the Lambda layer from the region map's AWS bucket when `LambdaLayerBucketPrefix` is AWS's name, otherwise from `<prefix>-<region>`, key `cid-resource-lambda-layer/cid-4.4.21.zip`. The data exports template and `cid-plugin.yml` carry their code inline and fetch none. | Source | cid-cfn.yml 4.4.21 lines 214-217, 360, 2138-2150; data-exports 0.13.0 `ZipFile` code |
+| 13.3 | The data exports template has no retention parameter; it recommends HOURLY granularity "unless your AWS invoice is more then $50M". | Source | data-exports 0.13.0 parameters, lines 133-139 |
+| 13.4 | `template_body` is limited to 51,200 bytes, so templates of this size deploy from a URL; CloudFormation reads a mirrored template, and the layer, from the caller's bucket as from AWS's. | **Unverified** (size limit from memory; mirror never deployed) | CloudFormation quotas page; a stack from the mirror in a sandbox |
 
 ## Prices used in descriptions and COSTS.md
 

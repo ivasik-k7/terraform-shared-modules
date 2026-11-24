@@ -36,8 +36,8 @@ variable "team" {
   nullable    = false
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,24}$", var.team))
-    error_message = "team must be 2-25 characters: lowercase letters, digits and hyphens, starting with a letter."
+    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.team)) ? (length(var.team) >= 2 ? length(var.team) <= 25 : false) : false
+    error_message = "team must be 2-25 characters: lowercase letters and digits, starting with a letter, words joined by single hyphens (Bedrock names accept no double or trailing hyphen)."
   }
 }
 
@@ -166,6 +166,20 @@ variable "platforms" {
   }
 }
 
+variable "cost_gate" {
+  description = "The HCP Terraform cost gate (policies/cost-gate.sentinel): one run may add at most max_increase_percent of the account limit to the monthly bill. output.plan_gate.max_monthly_increase is the policy's parameter."
+  type = object({
+    max_increase_percent = optional(number, 10)
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = var.cost_gate.max_increase_percent > 0 ? var.cost_gate.max_increase_percent <= 100 : false
+    error_message = "cost_gate.max_increase_percent must be above 0 and at most 100."
+  }
+}
+
 # ---------------------------------------------------------------------------
 # AI
 # ---------------------------------------------------------------------------
@@ -213,9 +227,10 @@ variable "ai" {
   validation {
     condition = alltrue([
       alltrue([for k, a in var.ai.applications : alltrue([
-        can(regex("^[a-z][a-z0-9-]{0,30}$", k)),
+        can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", k)), length(k) <= 31,
         length(a.models) > 0, a.monthly_cap > 0,
-        alltrue([for alias, arn in a.models : can(regex("^[a-z][a-z0-9-]{0,20}$", alias)) ? can(regex("^arn:aws[a-z-]*:bedrock:[a-z0-9-]+:([0-9]{12})?:(foundation-model|inference-profile)/.+$", arn)) : false]),
+        alltrue([for alias, arn in a.models : can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", alias)) ? can(regex("^arn:aws[a-z-]*:bedrock:[a-z0-9-]+:([0-9]{12})?:(foundation-model|inference-profile)/.+$", arn)) : false]),
+        alltrue([for alias, arn in a.models : length("${var.team}-${k}-${alias}") <= 64]),
       ])]),
       length(var.ai.prices) <= 5,
       alltrue([for m, p in var.ai.prices : p.input_per_million >= 0 ? p.output_per_million >= 0 : false]),
@@ -225,7 +240,7 @@ variable "ai" {
       alltrue([for k, q in var.ai.quotas : can(regex("^L-[A-F0-9]{8}$", q.quota_code)) ? (q.model_id == "" ? true : contains(keys(var.ai.prices), q.model_id)) : false]),
       contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.ai.invocation_logs.retention_days),
     ])
-    error_message = "ai: applications keyed lowercase with models (alias => foundation-model or inference-profile ARN) and a monthly_cap above 0; at most five prices, not negative; burn_per_hour needs prices; unit a currency code; quotas with an L-XXXXXXXX code and a model_id from prices, or none; invocation_logs.retention_days a CloudWatch Logs retention."
+    error_message = "ai: applications and model aliases lowercase words joined by single hyphens, with <team>-<application>-<alias> at most 64 characters (the inference profile name); models are foundation-model or inference-profile ARNs; a monthly_cap above 0; at most five prices, not negative; burn_per_hour needs prices; unit a currency code; quotas with an L-XXXXXXXX code and a model_id from prices, or none; invocation_logs.retention_days a CloudWatch Logs retention."
   }
 }
 
@@ -257,10 +272,10 @@ variable "schedules" {
       can(regex("^[a-z][a-z0-9-]{0,20}$", k)),
       length(s.tag_values) + length(s.rds_instances) > 0,
       length(s.rds_instances) <= 20,
-      alltrue([for d in s.rds_instances : can(regex("^[a-zA-Z][a-zA-Z0-9-]{0,62}$", d)) ? length("${k}-${d}-start") <= 64 : false]),
+      alltrue([for d in s.rds_instances : can(regex("^[a-zA-Z][a-zA-Z0-9-]{0,62}$", d)) ? length("${k}.rds.${d}.start") <= 64 : false]),
       can(regex("^cron\\(.+\\)$", s.stop)), can(regex("^cron\\(.+\\)$", s.start)),
     ])])
-    error_message = "schedules: keys lowercase; tag_values, rds_instances (up to 20 DB instance identifiers, with the schedule name short enough for <name>-<instance>-start to fit 64 characters) or both; stop and start as cron(...) expressions."
+    error_message = "schedules: keys lowercase; tag_values, rds_instances (up to 20 DB instance identifiers, with <name>.rds.<instance>.start, the schedule's name, at most 64 characters) or both; stop and start as cron(...) expressions."
   }
 }
 

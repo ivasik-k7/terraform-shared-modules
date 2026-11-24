@@ -1,13 +1,24 @@
 # AWS's own Cloud Intelligence Dashboards data pipeline, source side: the
 # exports are created here and delivered to the destination account's bucket.
 # The template creates AWS::BCMDataExports::Export directly in us-east-1, and
-# through a Lambda-backed custom resource elsewhere.
+# through a Lambda-backed custom resource elsewhere; it sets each export's
+# S3Region to the stack's own Region, so the stack runs in the destination's.
 # https://github.com/aws-solutions-library-samples/cloud-intelligence-dashboards-data-collection/tree/main/data-exports
+locals {
+  data_exports_template = "data-exports/${var.data_exports.version}/data-exports-aggregation.yaml"
+
+  # sha256 of the file reviewed for this module, fetched from AWS's bucket.
+  data_exports_reviewed_sha256 = lookup({
+    "data-exports/0.13.0/data-exports-aggregation.yaml" = "1eba08e62689ecc5feb81ce452e6216ad736897c6d66510be605e5da02855009"
+  }, local.data_exports_template, null)
+}
+
 resource "aws_cloudformation_stack" "data_exports_source" {
   count = local.create && var.data_exports.enabled ? 1 : 0
 
+  region       = var.data_exports.region
   name         = "${var.name}-cid-data-exports-source"
-  template_url = "https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn/data-exports/${var.data_exports.version}/data-exports-aggregation.yaml"
+  template_url = "${var.data_exports.template_url_prefix}/${local.data_exports_template}"
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"]
   tags         = local.tags
 

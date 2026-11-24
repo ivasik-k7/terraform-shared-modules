@@ -65,6 +65,7 @@ own Region, because the Bedrock metrics are regional.
 | `burn_per_hour` without prices | Nothing to price |
 | A quota tied to a model with no price | The ceiling cannot be priced |
 | A model that is not a foundation model or inference profile ARN | A profile copies one of those |
+| Names with double or trailing hyphens, or `<team>-<application>-<alias>` over 64 characters | Bedrock refuses the inference profile at apply |
 | Plus everything [`keel-limits`](../keel-limits) refuses | A limit that cannot be a budget |
 
 ### Advisory checks
@@ -105,9 +106,20 @@ own Region, because the Bedrock metrics are regional.
 - **Schedules stop and start through AWS runbooks.** EC2 instances are picked
   by tag and RDS instances by identifier. Starting starts every tagged
   instance, including one somebody stopped by hand.
-- **The FinOps role reads cost and metadata, no data.** It has no object,
-  table, secret or log content. Its name is the same in every account.
-- **The cost gate** is `policies/cost-gate.sentinel`, set with `plan_gate`.
+- **The FinOps role reads cost and named metadata actions only.** No
+  wildcards: `ec2:Describe*` includes user data, `ecs:Describe*` task
+  environments, and `lambda:GetFunctionConfiguration` returns environment
+  variables, which hold secrets in practice. Lambda is left to Compute
+  Optimizer. Its name is the same in every account.
+- **The cost gate** is `policies/cost-gate.sentinel`. Its parameter
+  `max_monthly_increase` is `plan_gate.max_monthly_increase`: the account
+  limit times `cost_gate.max_increase_percent` (10%). No monthly amount (an
+  auto-adjusting limit), no gate.
+- **Names follow Bedrock's patterns.** Team, application and alias are
+  lowercase words joined by single hyphens, and `<team>-<application>-<alias>`
+  is at most 64 characters, the inference profile name's limit.
+- **Schedules are named `<schedule>.ec2.<action>` and
+  `<schedule>.rds.<instance>.<action>`,** so no two collide.
 
 ## Contract outputs
 
@@ -116,7 +128,7 @@ own Region, because the Bedrock metrics are regional.
 | `inference_profile_arns` | Application teams: the ARNs to call |
 | `topic_arns` | The team's own alarms: notify these to reach owners and the control plane |
 | `plan_gate` | The HCP Terraform policy set's parameters |
-| `controls` | The controls register: FC-01, FC-04, FC-06 and `LIMIT-<name>` per limit |
+| `controls` | The register: FC-01, FC-04, FC-06 and `LIMIT-<name>` from the account part, `AI-BURN-<region>` from each Region; they merge across calls |
 | `ai_ceilings` | Finance and the AI owner: the hourly worst case at today's quotas |
 | `finops_read_role_arn` | The FinOps account's tooling |
 | `kms_key_policy_requirements` | The key owner, when topics, queue and logs use a customer key |

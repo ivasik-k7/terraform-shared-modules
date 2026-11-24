@@ -1,10 +1,13 @@
-# AWS managed monitors: a dimension, and for TAG and COST_CATEGORY the key.
-# https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_AnomalyMonitor.html
+# AWS managed monitors by service and by account; the provider takes no key
+# with a dimension, so TAG and COST_CATEGORY managed monitors cannot be
+# declared. A cost category value is a customer managed monitor, one value
+# each, 500 per management account.
+# https://docs.aws.amazon.com/cost-management/latest/userguide/management-limits.html
 resource "aws_ce_anomaly_monitor" "this" {
   for_each = local.active_monitors
 
   name                  = "${var.name}-${each.key}"
-  monitor_type          = "DIMENSIONAL"
+  monitor_type          = each.value.type
   monitor_dimension     = each.value.dimension
   monitor_specification = each.value.specification
   tags                  = local.tags

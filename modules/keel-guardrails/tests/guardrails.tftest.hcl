@@ -40,6 +40,34 @@ run "the_tag_policy_uses_the_documented_operators" {
   }
 }
 
+run "a_tag_key_with_punctuation_keeps_it_in_the_policy_key" {
+  # The policy key must be the tag key bar case; cost-centre once became
+  # costcentre.
+  command = plan
+
+  variables {
+    required_tags = { cost-centre = { report_for = ["ec2:instance"] } }
+  }
+
+  assert {
+    condition     = jsondecode(aws_organizations_policy.this["tags"].content).tags["cost-centre"].tag_key["@@assign"] == "cost-centre"
+    error_message = "the policy key is the tag key, lowercased."
+  }
+}
+
+run "each_create_action_is_checked_against_its_own_resource" {
+  # One statement listing every action and every resource checked
+  # RunInstances against volumes too.
+  command = plan
+
+  assert {
+    condition = alltrue([for st in jsondecode(aws_organizations_policy.this["untagged"].content).Statement :
+      contains(st.Action, "ec2:RunInstances") ? st.Resource == "arn:*:ec2:*:*:instance/*" : true
+    ])
+    error_message = "RunInstances is denied only against the instance it creates."
+  }
+}
+
 run "untagged_creation_is_denied_except_for_break_glass" {
   command = plan
 

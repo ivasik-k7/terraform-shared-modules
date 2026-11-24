@@ -74,6 +74,9 @@ The default tiers:
 | A Net metric on an unscoped limit | An unscoped budget takes its basis from cost types, which have no net option |
 | A USAGE limit without usage types; an RI limit without exactly one service | AWS Budgets needs them |
 | An action or anomaly monitor on a commitment limit; an action with both roles and an SCP | Not meaningful, or not one action |
+| A commitment limit scoped by tags, cost categories, Regions or usage types | A commitment budget filters on services and accounts only; the rest would be dropped and the whole account measured |
+| A cost category anomaly monitor on more than one value | A customer managed monitor tracks one cost category value |
+| A threshold with no owner and no topic; an anomaly monitor or action without its severity's topic | AWS refuses a notification without a subscriber, and an immediate alert or action report without SNS |
 
 ### Advisory checks
 
@@ -91,6 +94,10 @@ The default tiers:
   Spend without the tag counts only against an unscoped limit.
 - **Actions are global per account.** Budget actions are free for the first
   two per account, then $0.10 a day each.
+- **A lock reaches its roles at any IAM path.** `lock_roles` are names; the
+  action role may attach the lock to `role/<name>` and `role/*/<name>`.
+- **AWS Budgets assumes the action role only for this account's budgets**
+  (`aws:SourceAccount` and `aws:SourceArn`, as AWS's example policy).
 
 ## Contract outputs
 

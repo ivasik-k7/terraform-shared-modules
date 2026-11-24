@@ -11,7 +11,7 @@ locals {
   # Tag policy syntax: tag_key, tag_value, enforced_for, report_required_tag_for.
   # https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_example-tag-policies.html
   tag_policy = jsonencode({
-    tags = { for k, t in var.required_tags : lower(replace(k, "/[^A-Za-z0-9]/", "")) => merge(
+    tags = { for k, t in var.required_tags : lower(k) => merge(
       { tag_key = { "@@assign" = k } },
       length(t.values) > 0 ? { tag_value = { "@@assign" = t.values } } : {},
       length(t.enforce_for) > 0 ? { enforced_for = { "@@assign" = t.enforce_for } } : {},
@@ -22,15 +22,18 @@ locals {
   untagged_exemption = length(var.deny_untagged.exempt_principals) == 0 ? {} : {
     ArnNotLike = { "aws:PrincipalArn" = var.deny_untagged.exempt_principals }
   }
+  # One statement per tag and resource pattern, with the actions that create
+  # that resource: a statement joins every action to every resource it lists.
+  untagged_resources = sort(distinct(values(var.deny_untagged.actions)))
   deny_untagged_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [for t in var.deny_untagged.tags : {
-      Sid       = "RequireTag${replace(title(replace(t, "/[^A-Za-z0-9]/", " ")), " ", "")}"
+    Statement = flatten([for t in var.deny_untagged.tags : [for i, r in local.untagged_resources : {
+      Sid       = "RequireTag${replace(title(replace(t, "/[^A-Za-z0-9]/", " ")), " ", "")}${i}"
       Effect    = "Deny"
-      Action    = sort(keys(var.deny_untagged.actions))
-      Resource  = sort(distinct(values(var.deny_untagged.actions)))
+      Action    = sort([for a, res in var.deny_untagged.actions : a if res == r])
+      Resource  = r
       Condition = merge({ Null = { "aws:RequestTag/${t}" = "true" } }, local.untagged_exemption)
-    }]
+    }]])
   })
 
   model_exemption = length(var.bedrock_models.exempt_principals) == 0 ? {} : {

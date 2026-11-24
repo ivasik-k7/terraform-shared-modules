@@ -2,7 +2,7 @@
 # recommendation services, anomaly monitors with one immediate alert routed by
 # impact on the control plane, organization limits by business unit, platform
 # and service, commitment targets, billing views for the FinOps account and a
-# business unit, FinOps Agent administered from the FinOps account, and the
+# business unit, the FinOps Agent decision with its setup steps, and the
 # source side of the Cloud Intelligence Dashboards pipeline. Billing APIs and
 # their events live in us-east-1, so this workspace runs there.
 
@@ -41,9 +41,8 @@ module "billing" {
   }
 
   anomaly_detection = {
-    cost_categories = ["BusinessUnit", "Environment"]
-    tags            = ["Platform"]
-    alert           = { min_impact_absolute = 100 }
+    cost_category_values = { BusinessUnit = ["lending", "payments", "platform"] }
+    alert                = { min_impact_absolute = 100 }
     digests = {
       weekly = { frequency = "WEEKLY", min_impact_absolute = 50, emails = ["finops@example.com"] }
     }
@@ -90,11 +89,12 @@ module "billing" {
     control_plane_bus_arn = "arn:aws:events:eu-west-2:333333333333:event-bus/keel"
   }
 
-  acknowledged_checks = ["finops_agent_data_stays_in_the_us"]
+  acknowledged_checks = ["finops_agent_is_approved"]
 
   data_exports = {
     enabled                = true
     destination_account_id = "333333333333"
+    region                 = "eu-west-2"
   }
 }
 

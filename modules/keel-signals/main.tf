@@ -85,35 +85,49 @@ resource "aws_sns_topic_subscription" "emails" {
 }
 
 # ---------------------------------------------------------------------------
-# Topics to EventBridge: SNS to SQS, then a pipe per severity to the default
-# bus. A pipe can target only the default bus of its own account and Region,
-# so a rule forwards from there.
+# Topics to EventBridge: each topic delivers to its own queue, and a pipe per
+# queue puts the SNS envelope on the default bus. A pipe can target only the
+# default bus of its own account and Region, so a rule forwards from there.
+# A pipe deletes the SQS messages its filter does not match, so pipes never
+# share a queue.
 # https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-event-target.html
+# https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-event-filtering.html
 # ---------------------------------------------------------------------------
 
-resource "aws_sqs_queue" "signals" {
+resource "aws_sqs_queue" "undelivered" {
   count = local.forward ? 1 : 0
 
-  name                      = "${var.name}-signals"
-  message_retention_seconds = 345600
+  name                      = "${var.name}-signals-undelivered"
+  message_retention_seconds = 1209600
   kms_master_key_id         = var.kms_key_arn != "" ? var.kms_key_arn : null
   sqs_managed_sse_enabled   = var.kms_key_arn == "" ? true : null
   tags                      = local.tags
 }
 
-resource "aws_sqs_queue_policy" "signals" {
-  count = local.forward ? 1 : 0
+resource "aws_sqs_queue" "signals" {
+  for_each = local.bridged
 
-  queue_url = aws_sqs_queue.signals[0].id
+  name                      = "${var.name}-${each.key}-signals"
+  message_retention_seconds = 345600
+  kms_master_key_id         = var.kms_key_arn != "" ? var.kms_key_arn : null
+  sqs_managed_sse_enabled   = var.kms_key_arn == "" ? true : null
+  redrive_policy            = jsonencode({ deadLetterTargetArn = aws_sqs_queue.undelivered[0].arn, maxReceiveCount = 5 })
+  tags                      = merge(local.tags, { Severity = upper(each.key) })
+}
+
+resource "aws_sqs_queue_policy" "signals" {
+  for_each = aws_sqs_queue.signals
+
+  queue_url = each.value.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid       = "SeverityTopics"
+      Sid       = "SeverityTopic"
       Effect    = "Allow"
       Principal = { Service = "sns.amazonaws.com" }
       Action    = "sqs:SendMessage"
-      Resource  = aws_sqs_queue.signals[0].arn
-      Condition = { ArnEquals = { "aws:SourceArn" = [for t in aws_sns_topic.severity : t.arn] } }
+      Resource  = each.value.arn
+      Condition = { ArnEquals = { "aws:SourceArn" = aws_sns_topic.severity[each.key].arn } }
     }]
   })
 }
@@ -123,7 +137,7 @@ resource "aws_sns_topic_subscription" "to_queue" {
 
   topic_arn = aws_sns_topic.severity[each.key].arn
   protocol  = "sqs"
-  endpoint  = aws_sqs_queue.signals[0].arn
+  endpoint  = aws_sqs_queue.signals[each.key].arn
 
   depends_on = [aws_sqs_queue_policy.signals]
 }
@@ -132,7 +146,7 @@ resource "aws_iam_role" "pipes" {
   count = local.forward ? 1 : 0
 
   name_prefix          = "${substr(var.name, 0, 20)}-signal-pipes-"
-  description          = "EventBridge Pipes moving ${var.name}'s signals from the queue to the default bus"
+  description          = "EventBridge Pipes moving ${var.name}'s signals from the queues to the default bus"
   permissions_boundary = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -149,17 +163,17 @@ resource "aws_iam_role" "pipes" {
 resource "aws_iam_role_policy" "pipes" {
   count = local.forward ? 1 : 0
 
-  name = "queue-to-bus"
+  name = "queues-to-bus"
   role = aws_iam_role.pipes[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = concat(
       [
-        { Sid = "ReadQueue", Effect = "Allow", Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], Resource = aws_sqs_queue.signals[0].arn },
+        { Sid = "ReadQueues", Effect = "Allow", Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], Resource = [for q in aws_sqs_queue.signals : q.arn] },
         { Sid = "PutOnDefaultBus", Effect = "Allow", Action = "events:PutEvents", Resource = local.default_bus_arn },
       ],
       var.kms_key_arn == "" ? [] : [{
-        Sid       = "DecryptQueue"
+        Sid       = "DecryptQueues"
         Effect    = "Allow"
         Action    = "kms:Decrypt"
         Resource  = var.kms_key_arn
@@ -169,36 +183,94 @@ resource "aws_iam_role_policy" "pipes" {
   })
 }
 
-# One pipe per severity, selected by the topic the message came through; the
-# severity travels in the event source (keel.<severity>).
+# The event carries the severity in its source (keel.<severity>), the SNS
+# envelope in its detail, and its queue in resources, so a forwarding rule
+# picks this instance's signals only. Pipes parse a JSON SQS body, and an
+# object inserted unquoted stays valid JSON.
+# https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-input-transformation.html
 resource "aws_pipes_pipe" "severity" {
   for_each = local.bridged
 
   name     = "${var.name}-${each.key}-signals"
   role_arn = aws_iam_role.pipes[0].arn
-  source   = aws_sqs_queue.signals[0].arn
+  source   = aws_sqs_queue.signals[each.key].arn
   target   = local.default_bus_arn
   tags     = local.tags
 
   source_parameters {
-    filter_criteria {
-      filter {
-        pattern = jsonencode({ body = { TopicArn = [aws_sns_topic.severity[each.key].arn] } })
-      }
-    }
     sqs_queue_parameters {
       batch_size = 1
     }
   }
 
   target_parameters {
+    input_template = "{\"severity\": \"${each.key}\", \"sns\": <$.body>}"
+
     eventbridge_event_bus_parameters {
       source      = "keel.${each.key}"
       detail_type = "Keel Signal"
+      resources   = [aws_sqs_queue.signals[each.key].arn]
     }
   }
 
   depends_on = [aws_iam_role_policy.pipes]
+}
+
+# ---------------------------------------------------------------------------
+# A signal that cannot leave is visible: messages parked in the dead-letter
+# queue, or a queue no pipe is draining
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_metric_alarm" "undelivered" {
+  count = local.forward ? 1 : 0
+
+  alarm_name          = "${var.name}-signals-undelivered"
+  alarm_description   = "Signals from ${var.name} that the pipes failed five times are parked in ${aws_sqs_queue.undelivered[0].name}; they have not reached the control plane."
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = aws_sqs_queue.undelivered[0].name }
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.severity["high"].arn]
+  tags                = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "stalled" {
+  count = local.forward ? 1 : 0
+
+  alarm_name          = "${var.name}-signals-stalled"
+  alarm_description   = "A signal from ${var.name} has waited over 15 minutes in its queue: a pipe is not draining it (stopped, or denied by IAM or KMS)."
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 900
+  evaluation_periods  = 1
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.severity["high"].arn]
+  tags                = local.tags
+
+  metric_query {
+    id          = "oldest"
+    expression  = "MAX(METRICS())"
+    label       = "Oldest signal waiting (seconds)"
+    return_data = true
+  }
+
+  dynamic "metric_query" {
+    for_each = aws_sqs_queue.signals
+    content {
+      id = "q_${metric_query.key}"
+      metric {
+        namespace   = "AWS/SQS"
+        metric_name = "ApproximateAgeOfOldestMessage"
+        dimensions  = { QueueName = metric_query.value.name }
+        stat        = "Maximum"
+        period      = 300
+      }
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -207,12 +279,12 @@ resource "aws_pipes_pipe" "severity" {
 
 locals {
   forward_rules = !local.forward ? {} : merge(
-    { signals = jsonencode({ source = [{ prefix = "keel." }] }) },
+    { signals = jsonencode({ source = [{ prefix = "keel." }], resources = [for q in aws_sqs_queue.signals : q.arn] }) },
     length(var.forward.alarm_name_prefixes) == 0 ? {} : {
       alarms = jsonencode({
         source        = ["aws.cloudwatch"]
         "detail-type" = ["CloudWatch Alarm State Change"]
-        detail        = { alarmName = [for p in var.forward.alarm_name_prefixes : { prefix = p }] }
+        detail        = { state = { value = ["ALARM"] }, alarmName = [for p in var.forward.alarm_name_prefixes : { prefix = p }] }
       })
     },
     !var.forward.anomalies ? {} : {

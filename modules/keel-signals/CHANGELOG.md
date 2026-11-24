@@ -13,6 +13,10 @@ Entries marked **BREAKING** change what an unchanged caller's plan does.
 
 - Four severity topics open to Budgets, Cost Anomaly Detection and CloudWatch
   in the account, with e-mail owners by severity.
-- Topics to the control plane: SNS to SQS, a pipe per severity to the default
-  bus (`keel.<severity>`), and a forwarding rule to the control plane bus.
-- Optional forwarding of alarms by name prefix and of Anomaly Detected events.
+- Topics to the control plane: a queue and an unfiltered pipe per severity to
+  the default bus (`keel.<severity>`, the SNS envelope in `detail.sns`, the
+  queue in `resources`), and a forwarding rule to the control plane bus that
+  takes this instance's events only.
+- A dead-letter queue, and alarms on parked and stalled signals.
+- Optional forwarding of alarms entering ALARM by name prefix, and of Anomaly
+  Detected events.

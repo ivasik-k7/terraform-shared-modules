@@ -15,7 +15,7 @@ externally.**
 | Inference profiles | Free | | Model calls are billed as before |
 | Burn alarm | CloudWatch metric-math alarm pricing, per metric in the expression | Up to ten metrics, one alarm per Region | |
 | Invocation logs | CloudWatch Logs ingestion and storage | One record per model call, metadata only | **The growing line**, bounded by `retention_days` (default 90) |
-| Schedules | EventBridge Scheduler invocations and Automation steps | Two a day per schedule per working day | Well inside the free tiers at this volume |
+| Schedules | Scheduler: 14 million invocations a month free, then $1 a million. Automation: $0.002 a step, no free tier stated | Two runs a schedule a working day; a few steps per instance per run | About $0.2-0.4 an instance a month; the step count per runbook is not checked |
 | FinOps role, quota reads | Free | | |
 
 ## What the module saves

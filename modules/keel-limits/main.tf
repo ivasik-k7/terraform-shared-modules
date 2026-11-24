@@ -176,6 +176,12 @@ resource "aws_budgets_budget" "spend" {
       condition     = length(local.notifications[each.key]) <= 10
       error_message = "Limit ${each.key} has ${length(local.notifications[each.key])} thresholds; AWS Budgets allows ten notifications per budget."
     }
+    # A notification needs at least one subscriber.
+    # https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_budgets_NotificationWithSubscribers.html
+    precondition {
+      condition     = length(each.value.owners) > 0 ? true : alltrue([for n in local.notifications[each.key] : contains(keys(var.topic_arns), n.severity)])
+      error_message = "Limit ${each.key} has no owners, and no topic for ${join(", ", distinct([for n in local.notifications[each.key] : upper(n.severity) if !contains(keys(var.topic_arns), n.severity)]))}: AWS Budgets refuses a notification with no subscriber. Add owners or those topics."
+    }
   }
 }
 
@@ -249,8 +255,13 @@ resource "aws_ce_anomaly_monitor" "this" {
 
   lifecycle {
     precondition {
-      condition     = local.monitor_specification[each.key] != "" ? alltrue([for e in local.elements[each.key] : length(e.values) <= 10]) : false
-      error_message = "Limit ${each.key} asks for an anomaly monitor, but a monitor watches exactly one tag key, one cost category or one set of accounts, with up to ten values; its scope has ${length(local.elements[each.key])} filters."
+      condition     = local.monitor_specification[each.key] != "" ? alltrue([for e in local.elements[each.key] : length(e.values) <= (e.kind == "cost_categories" ? 1 : 10)]) : false
+      error_message = "Limit ${each.key} asks for an anomaly monitor, but a monitor watches exactly one tag key (up to ten values), one cost category (one value) or up to ten accounts; its scope has ${length(local.elements[each.key])} filters."
+    }
+    # https://docs.aws.amazon.com/cost-management/latest/userguide/management-limits.html
+    precondition {
+      condition     = contains(keys(var.topic_arns), var.tiers[each.value.tier].anomaly_severity)
+      error_message = "Limit ${each.key}'s anomaly alerts go to the ${upper(var.tiers[each.value.tier].anomaly_severity)} topic, which topic_arns does not have; immediate anomaly alerts need an SNS topic."
     }
   }
 }
@@ -265,7 +276,7 @@ resource "aws_ce_anomaly_subscription" "this" {
 
   subscriber {
     type    = "SNS"
-    address = var.topic_arns[var.tiers[each.value.tier].anomaly_severity]
+    address = lookup(var.topic_arns, var.tiers[each.value.tier].anomaly_severity, "")
   }
 
   threshold_expression {
@@ -318,7 +329,10 @@ resource "aws_iam_role" "action" {
       Effect    = "Allow"
       Principal = { Service = "budgets.amazonaws.com" }
       Action    = "sts:AssumeRole"
-      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
+      Condition = {
+        StringEquals = { "aws:SourceAccount" = local.account_id }
+        ArnLike      = { "aws:SourceArn" = "arn:${local.partition}:budgets::${local.account_id}:budget/*" }
+      }
     }]
   })
   tags = local.tags
@@ -335,7 +349,7 @@ resource "aws_iam_role_policy" "lock" {
       Sid       = "AttachTheLockOnly"
       Effect    = "Allow"
       Action    = ["iam:AttachRolePolicy", "iam:DetachRolePolicy"]
-      Resource  = [for r in each.value.action.lock_roles : "arn:${local.partition}:iam::${local.account_id}:role/${r}"]
+      Resource  = flatten([for r in each.value.action.lock_roles : ["arn:${local.partition}:iam::${local.account_id}:role/${r}", "arn:${local.partition}:iam::${local.account_id}:role/*/${r}"]])
       Condition = { ArnEquals = { "iam:PolicyARN" = aws_iam_policy.lock[each.key].arn } }
     }]
   })
@@ -398,8 +412,15 @@ resource "aws_budgets_budget_action" "this" {
   }
 
   subscriber {
-    address           = var.topic_arns["critical"]
+    address           = lookup(var.topic_arns, "critical", "")
     subscription_type = "SNS"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = contains(keys(var.topic_arns), "critical")
+      error_message = "Limit ${each.key} has an action, which reports to the CRITICAL topic; topic_arns has none."
+    }
   }
 
   depends_on = [aws_iam_role_policy.lock, aws_iam_role_policy.scp]

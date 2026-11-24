@@ -16,7 +16,7 @@ pulled for this document**. **Verify before quoting externally.**
 | Severity topics, queue, pipes, forwarding (`keel-signals`) | Cents a month at alert volumes | Alert volume |
 | Anomaly alert topic | SNS publishes and e-mail deliveries | Anomaly count |
 | Cost Explorer API | $0.01 a request | This module makes none at run time |
-| Data exports (CUR 2.0, FOCUS, COH) | S3 storage in the destination account | `keel-insights`' bucket lifecycle |
+| Data exports (CUR 2.0, FOCUS, COH) | S3 storage in the destination account | Nothing yet: the CID bucket keeps every current object (`keel-insights` COSTS.md) |
 
 The line that grows without anyone noticing is in the destination account:
 hourly CUR 2.0 and FOCUS exports with resource IDs accumulate every month

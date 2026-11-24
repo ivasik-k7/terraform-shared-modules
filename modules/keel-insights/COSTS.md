@@ -13,9 +13,22 @@ externally.**
 | Athena | Per TB scanned by dataset refreshes and queries | This account |
 | Lambda, Glue crawlers | Small, per run | This account |
 
-**The growing line** is the export data: hourly granularity and resource IDs
-multiply rows. Daily granularity and a lifecycle rule on old billing periods
-bound it.
+**The growing line** is the export data, kept on purpose. The CID template's
+bucket rules expire noncurrent versions and abort stale uploads
+(data-exports 0.13.0, lines 314-323). No rule expires current objects, and the
+module adds none: billing history is evidence, and compressed Parquet is the
+cheapest line here.
+
+- **Storage grows linearly.** It is S3 Standard per GB-month, times the months
+  kept. Measure it with `verify_commands.export_data_size` after two or three
+  months.
+- **Queries and SPICE cost more than storage.** They grow with how much
+  history the dashboards scan, not with how much is kept.
+- **Hourly granularity stays.** The template recommends HOURLY *"unless your
+  AWS invoice is more then $50M"*, and changing it needs a purge and backfill.
+- **If the measured growth matters,** the next step is S3 Intelligent-Tiering,
+  which Athena still reads, not deletion. A lifecycle rule managed outside the
+  template replaces the template's own rules and must repeat them.
 
 Order of magnitude for the whole option B, from the deck: under £10k a year in
 seats for ten authors and two hundred readers, plus about a person-month to

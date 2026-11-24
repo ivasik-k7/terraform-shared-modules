@@ -34,7 +34,7 @@ Give `event_bus_arn` to `keel-billing` and every `keel-team` as
 | Cost anomaly | `keel-billing` (Anomaly Detected events) | By total impact: below `anomaly_warning` INFO, then WARNING, HIGH, CRITICAL |
 | Alarm entering ALARM | `keel-team` (and any forwarded alarm) | CRITICAL if the name ends `critical_alarm_suffix` (the AI burn meter), else HIGH |
 | Keel event | anything that puts `source = "keel"` | Its `detail.severity` |
-| Budget notification | | Not routed: AWS Budgets publishes to SNS only, so owners hear it through `keel-billing`'s and `keel-team`'s topics |
+| Signal from an account's severity topic | `keel-signals` (budgets, limit anomalies, alarms), source `keel.<severity>` | The topic's severity; the message is `detail.sns.Message` |
 
 Every message carries context: the anomaly's dimension, account, impact and
 console link, or the alarm's name, account and reason.
@@ -45,6 +45,7 @@ console link, or the alarm's name, account and reason.
 |---|---|
 | Impact bands out of order | WARNING < HIGH < CRITICAL |
 | No organization and no accounts | Nobody could send |
+| A name over 19 characters | The Firehose role's name prefix, `<name>-evidence-firehose-`, may be 38 |
 
 ### Advisory checks
 
@@ -55,6 +56,11 @@ console link, or the alarm's name, account and reason.
 
 ## Behaviour to know about
 
+- **Only `keel-signals`' forwarding roles may put events** from other
+  accounts (`sources.principal_arn_patterns`, by default
+  `arn:*:iam::*:role/*-signal-forward-*`). Without it any role in the
+  organization could page CRITICAL and write a record the evidence lock keeps.
+  The FinOps account's own identities need only their IAM permissions.
 - **Evidence is everything on the bus**, compressed, under
   `events/yyyy/MM/dd/`, locked for `retention_days`, deleted after. The bus
   also archives events for `archive_days` for replay.

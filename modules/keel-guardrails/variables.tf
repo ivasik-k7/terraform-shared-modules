@@ -75,6 +75,13 @@ variable "required_tags" {
     ])])
     error_message = "required_tags: keys are tag keys (not aws:); values have at most one * each; resource types are service:type or service:ALL_SUPPORTED."
   }
+
+  # The policy key is the tag key without case.
+  # https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_example-tag-policies.html
+  validation {
+    condition     = length(distinct([for k in keys(var.required_tags) : lower(k)])) == length(var.required_tags)
+    error_message = "required_tags: two keys differ only in case; a tag policy holds one entry per key, whatever its case."
+  }
 }
 
 variable "deny_untagged" {

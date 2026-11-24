@@ -37,11 +37,10 @@ variable "acknowledged_checks" {
   validation {
     condition = alltrue([for c in var.acknowledged_checks : contains([
       "somebody_hears_an_anomaly",
-      "every_cost_category_is_watched",
       "spend_is_allocated_by_tags",
       "anomaly_events_reach_the_control_plane",
       "commitments_are_watched",
-      "finops_agent_data_stays_in_the_us",
+      "finops_agent_is_approved",
       "production_changes_only_by_people",
       "every_limit_has_an_owner",
     ], c)])
@@ -156,20 +155,22 @@ variable "optimization" {
 
 variable "anomaly_detection" {
   description = <<-EOT
-    Cost Anomaly Detection with AWS managed monitors, which pick up new accounts and values on their own. Free.
-      services, linked_accounts   a monitor per service, and per member account
-      cost_categories             a monitor per cost category, tracking each of its values
-      tags                        a monitor per cost allocation tag key, tracking each of its values
+    Cost Anomaly Detection. Free.
+      services               the AWS managed monitor by service
+      linked_accounts        the AWS managed monitor by member account, which picks up new accounts on its own
+      cost_category_values   a customer managed monitor per cost category value, for business units: { name =>
+                             values }. Each watches one value (AWS's limit), and a new value needs adding here
+    The provider declares managed monitors by dimension only, without the key TAG and COST_CATEGORY need, so
+    those two are customer managed. A team's own scope is watched by its limit's anomaly monitor (keel-limits).
       alert                       one immediate alert across every monitor, from min_impact_absolute: it emits the
                                   Anomaly Detected event the control plane routes by impact (one event per anomaly),
                                   and publishes to <name>-anomaly-alerts, where emails are subscribed
       digests                     DAILY or WEEKLY summaries to emails, each with its own floor
   EOT
   type = object({
-    services        = optional(bool, true)
-    linked_accounts = optional(bool, true)
-    cost_categories = optional(list(string), [])
-    tags            = optional(list(string), [])
+    services             = optional(bool, true)
+    linked_accounts      = optional(bool, true)
+    cost_category_values = optional(map(list(string)), {})
     alert = optional(object({
       enabled               = optional(bool, true)
       min_impact_absolute   = optional(number, 100)
@@ -188,6 +189,7 @@ variable "anomaly_detection" {
 
   validation {
     condition = alltrue([
+      length(flatten(values(var.anomaly_detection.cost_category_values))) <= 500,
       var.anomaly_detection.alert.min_impact_absolute >= 0, var.anomaly_detection.alert.min_impact_percentage >= 0,
       alltrue([for k, d in var.anomaly_detection.digests : alltrue([
         can(regex("^[a-z][a-z0-9-]{0,30}$", k)),
@@ -196,7 +198,7 @@ variable "anomaly_detection" {
         length(d.emails) > 0, length(d.emails) <= 10,
       ])]),
     ])
-    error_message = "anomaly_detection: impacts 0 or more; digests keyed lowercase, DAILY or WEEKLY, with one to ten emails."
+    error_message = "anomaly_detection: at most 500 cost category values (customer managed monitors per management account); impacts 0 or more; digests keyed lowercase, DAILY or WEEKLY, with one to ten emails."
   }
 }
 
@@ -262,6 +264,13 @@ variable "commitments" {
     ) : p >= 0 ? p <= 100 : false])
     error_message = "commitments: targets are percentages, 0 (off) to 100."
   }
+
+  validation {
+    condition = alltrue([for m in [var.commitments.ri_utilization, var.commitments.ri_coverage] :
+      length(distinct([for svc in keys(m) : trim(substr(lower(replace(svc, "/[^A-Za-z0-9]+/", "-")), 0, 26), "-")])) == length(m)
+    ])
+    error_message = "commitments: two RI services share their first 26 characters, which name their limits (ri-<kind>-<service>); one would replace the other."
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -305,11 +314,12 @@ variable "billing_views" {
 
 variable "finops_agent" {
   description = <<-EOT
-    AWS FinOps Agent (preview, us-east-1 only), an AI agent that answers cost questions and investigates anomalies
-    across the organization through its service-linked role. It keeps its data in us-east-1 and runs inference within
-    the US geography, whichever Regions the accounts use: a data-residency decision (check
-    finops_agent_data_stays_in_the_us). Pair it with keel-guardrails' ai_services_opt_out.
-      enabled                      trusted access for finops-agent.amazonaws.com
+    AWS FinOps Agent (preview), an AI agent that answers cost questions and investigates anomalies. Organization-wide,
+    it reads every member account's cost, usage and resource data, CloudTrail events and CloudWatch metrics through a
+    service-linked role that SCPs do not restrict, and everyone who can use the agent reads all of it. It runs in
+    us-east-1. Its organization access is turned on from its console, not by Terraform: enabled emits the steps and
+    the policy for whoever does it (output.finops_agent_setup), and a check until the decision is acknowledged.
+      enabled                      the organization has decided to use it
       delegated_admin_account_id   the account that administers it, usually the FinOps account. Empty: the
                                    management account
   EOT
@@ -377,6 +387,10 @@ variable "data_exports" {
     template (data-exports-aggregation.yaml): CUR 2.0, FOCUS 1.2 and Cost Optimization Hub exports from this
     account, delivered to the destination account where keel-insights runs. S3 storage only (COSTS.md).
       destination_account_id   the account keel-insights deploys in
+      region                   the Region keel-insights deploys in. The source stack runs there: the template
+                               delivers the exports to the bucket in its own Region (S3Region = AWS::Region)
+      template_url_prefix      where the template comes from: AWS's bucket, or the mirror keel-insights uses
+                               (its source_requirements). It runs here with CAPABILITY_NAMED_IAM
       version                  the template version, the same as keel-insights'
       resource_prefix          the same as keel-insights'
       cur2, focus, coh, carbon which exports to manage
@@ -387,6 +401,8 @@ variable "data_exports" {
   type = object({
     enabled                = optional(bool, false)
     destination_account_id = optional(string, "")
+    region                 = optional(string, "")
+    template_url_prefix    = optional(string, "https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn")
     version                = optional(string, "0.13.0")
     resource_prefix        = optional(string, "cid")
     cur2                   = optional(bool, true)
@@ -405,12 +421,14 @@ variable "data_exports" {
   validation {
     condition = alltrue([
       var.data_exports.enabled ? can(regex("^[0-9]{12}$", var.data_exports.destination_account_id)) : true,
+      var.data_exports.enabled ? can(regex("^[a-z]{2}(-[a-z]+)+-[0-9]$", var.data_exports.region)) : true,
+      can(regex("^https://[^\\s]+[^/]$", var.data_exports.template_url_prefix)),
       can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.data_exports.version)),
-      can(regex("^[a-z0-9][a-z0-9-]{0,20}$", var.data_exports.resource_prefix)),
+      can(regex("^[a-z0-9][a-z0-9-]{1,35}[a-z0-9]$", var.data_exports.resource_prefix)),
       contains(["HOURLY", "DAILY", "MONTHLY"], var.data_exports.cur2_granularity),
       contains(["HOURLY", "DAILY", "MONTHLY"], var.data_exports.focus_granularity),
       can(regex("^/([A-Za-z0-9+=,.@_-]+/)*$", var.data_exports.role_path)),
     ])
-    error_message = "data_exports: enabled needs a 12-digit destination_account_id; version x.y.z; resource_prefix lowercase; granularities HOURLY, DAILY or MONTHLY; role_path an IAM path."
+    error_message = "data_exports: enabled needs a 12-digit destination_account_id and the destination's region; template_url_prefix an https URL without a trailing slash; version x.y.z; resource_prefix 3-37 lowercase letters, digits and hyphens, not ending in a hyphen (the template's pattern); granularities HOURLY, DAILY or MONTHLY; role_path an IAM path."
   }
 }

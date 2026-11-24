@@ -59,23 +59,24 @@ output "schedules" {
 # ---------------------------------------------------------------------------
 
 output "plan_gate" {
-  description = "What the HCP Terraform cost gate (policies/cost-gate.sentinel) compares a run against: the team and its account limit. Null without a monthly account limit."
-  value = !local.account || local.account_limit == null ? null : (try(local.account_limit.period, "MONTHLY") != "MONTHLY" ? null : {
-    team           = var.team
-    tier           = local.account_limit.tier
-    monthly_budget = tonumber(local.account_limit.amount)
-    unit           = try(local.account_limit.unit, "USD")
-  })
+  description = "The HCP Terraform cost gate's parameters (policies/cost-gate.sentinel): max_monthly_increase, from the account limit and cost_gate.max_increase_percent, with the team, tier and limit it came from. Null without a monthly account limit with an amount."
+  value = !local.account || local.account_limit_amount == null ? null : {
+    max_monthly_increase = local.account_limit_amount * var.cost_gate.max_increase_percent / 100
+    team                 = var.team
+    tier                 = local.account_limit.tier
+    monthly_budget       = local.account_limit_amount
+    unit                 = try(local.account_limit.unit, "USD")
+  }
 }
 
 output "controls" {
-  description = "The Keel controls this call implements for the team, as register entries: FC-01, FC-04 and FC-06 and every limit (LIMIT-<name>)."
+  description = "The Keel controls this call implements for the team, as register entries: FC-01, FC-04 and FC-06 and every limit (LIMIT-<name>) from the account part, AI-BURN-<region> from each Region part. Keys do not collide across calls, so they merge."
   value = !local.create ? null : merge(
     !local.account || length(local.account_limits) == 0 ? {} : {
       "FC-01" = {
         statement      = "Every account is created with an owner and a budget"
         type           = "Prevent"
-        threshold      = "Owner ${var.team}, cost centre ${var.cost_centre}, ${local.account_limit.amount} ${try(local.account_limit.unit, "USD")} ${lower(try(local.account_limit.period, "MONTHLY"))}"
+        threshold      = "Owner ${var.team}, cost centre ${var.cost_centre}, ${try(local.account_limit.auto_adjust_months, 0) > 0 ? "the average of the last ${local.account_limit.auto_adjust_months} months" : "${try(local.account_limit.amount, "")} ${try(local.account_limit.unit, "USD")}"} ${lower(try(local.account_limit.period, "MONTHLY"))}"
         evidence       = "This configuration; the budget ${module.limits.budget_names[local.account_limits[0]]}"
         implemented_by = [module.limits.budget_names[local.account_limits[0]]]
       }
@@ -87,19 +88,22 @@ output "controls" {
         implemented_by = [module.limits.budget_names[local.account_limits[0]]]
       }
     },
-    length(var.ai.applications) == 0 ? {} : {
+    !local.account || length(var.ai.applications) == 0 ? {} : {
       "FC-06" = {
-        statement = "AI spend per application stays under its cap"
-        type      = "Detect"
-        threshold = join("; ", concat(
-          [for k, a in var.ai.applications : "${k}: ${a.monthly_cap} ${var.ai.unit} a month"],
-          local.burn_alarm ? ["burn above ${var.ai.burn_per_hour} ${var.ai.unit} an hour in ${local.region}"] : [],
-        ))
-        evidence = "AI budgets' notification history${local.burn_alarm ? "; the ai-burn alarm's history" : ""}${local.invocation_logs ? "; ${local.log_group_name}" : ""}"
-        implemented_by = concat(
-          sort([for k in keys(var.ai.applications) : module.limits.budget_names["ai-${k}"] if local.account]),
-          aws_cloudwatch_metric_alarm.ai_burn[*].alarm_name,
-        )
+        statement      = "AI spend per application stays under its cap"
+        type           = "Detect"
+        threshold      = join("; ", [for k, a in var.ai.applications : "${k}: ${a.monthly_cap} ${var.ai.unit} a month"])
+        evidence       = "AI limits' notification history; the burn alarms' history in each Region"
+        implemented_by = sort([for k in keys(var.ai.applications) : module.limits.budget_names["ai-${k}"]])
+      }
+    },
+    !local.burn_alarm ? {} : {
+      "AI-BURN-${local.region}" = {
+        statement      = "A runaway AI workload in ${local.region} pages within the hour"
+        type           = "Detect"
+        threshold      = "Priced token use above ${var.ai.burn_per_hour} ${var.ai.unit} in an hour"
+        evidence       = "The alarm's history${local.invocation_logs ? "; ${local.log_group_name}" : ""}"
+        implemented_by = aws_cloudwatch_metric_alarm.ai_burn[*].alarm_name
       }
     },
     [for c in [module.limits.controls] : c if c != null]...

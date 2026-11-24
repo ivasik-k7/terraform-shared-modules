@@ -12,7 +12,7 @@ All notable changes to this module. The format is
 - Mandatory tags as an organization tag policy, with report and enforcement
   resource types.
 - An SCP refusing to create resources without mandatory tags, with exempt
-  principals.
+  principals, one statement per tag and resource.
 - An SCP allowing only approved Bedrock models in approved Regions.
 - `ai_services_opt_out`: an AI services opt-out policy, `default` covering
   every AI service.

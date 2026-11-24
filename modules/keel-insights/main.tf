@@ -9,13 +9,20 @@ locals {
 
   acknowledged = toset(var.acknowledged_checks)
 
-  # AWS's published CID templates, by version.
+  # AWS's published CID templates, by version, or the caller's mirror of them.
   # https://github.com/aws-solutions-library-samples/cloud-intelligence-dashboards-framework/tree/main/terraform/cicd-deployment
-  template_base = "https://aws-managed-cost-intelligence-dashboards.s3.amazonaws.com/cfn"
-  templates = {
-    data_exports = "${local.template_base}/data-exports/${var.data_exports.version}/data-exports-aggregation.yaml"
-    dashboards   = "${local.template_base}/${var.dashboards.version}/cid-cfn.yml"
-    plugin       = "${local.template_base}/${var.dashboards.version}/cid-plugin.yml"
+  template_paths = {
+    data_exports = "data-exports/${var.data_exports.version}/data-exports-aggregation.yaml"
+    dashboards   = "${var.dashboards.version}/cid-cfn.yml"
+    plugin       = "${var.dashboards.version}/cid-plugin.yml"
+  }
+  templates = { for k, p in local.template_paths : k => "${var.templates.url_prefix}/${p}" }
+
+  # sha256 of the files reviewed for this module, fetched from AWS's bucket.
+  reviewed_sha256 = {
+    "data-exports/0.13.0/data-exports-aggregation.yaml" = "1eba08e62689ecc5feb81ce452e6216ad736897c6d66510be605e5da02855009"
+    "4.4.21/cid-cfn.yml"                                = "4ff3367615fe05dea571a0c4960d446a9e6f395c311b0d0fffc487b99422d455"
+    "4.4.21/cid-plugin.yml"                             = "c130bbb1f75ee23b2d71d34f1ede5d8f94f4e286cd7f12cc5388a40c0b91f2c5"
   }
   capabilities = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"]
   yes_no       = { true = "yes", false = "no" }
@@ -91,6 +98,7 @@ resource "aws_cloudformation_stack" "dashboards" {
     PermissionsBoundary                = var.permissions_boundary_arn
     RolePath                           = var.role_path
     DeploymentType                     = "Terraform"
+    LambdaLayerBucketPrefix            = var.templates.lambda_layer_bucket_prefix
   }
 
   timeouts {

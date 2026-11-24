@@ -22,8 +22,11 @@ locals {
 resource "aws_bedrock_inference_profile" "this" {
   for_each = local.profiles
 
-  name        = "${var.team}-${each.value.application}-${each.value.alias}"
-  description = "${var.team} / ${each.value.application}: ${each.value.alias}"
+  name = "${var.team}-${each.value.application}-${each.value.alias}"
+  # Pattern ([0-9a-zA-Z:.][ _-]?)+ for the description, ([0-9a-zA-Z][ _-]?)+
+  # and 64 characters for the name.
+  # https://docs.aws.amazon.com/bedrock/latest/APIReference/API_CreateInferenceProfile.html
+  description = "${var.team} ${each.value.application} ${each.value.alias}"
   tags = merge(
     local.tags,
     { Application = each.value.application },

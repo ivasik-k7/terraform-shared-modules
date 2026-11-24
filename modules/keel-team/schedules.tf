@@ -2,7 +2,8 @@ locals {
   schedules = local.regional ? var.schedules : {}
 
   ec2_runs = merge([for k, s in local.schedules : {
-    for action in ["stop", "start"] : "${k}-ec2-${action}" => {
+    for action in ["stop", "start"] : "${k}/ec2/${action}" => {
+      name     = "${k}.ec2.${action}"
       schedule = k
       action   = action
       what     = "EC2 instances tagged ${s.tag_key} = ${join(" or ", s.tag_values)}"
@@ -19,7 +20,8 @@ locals {
   } if length(s.tag_values) > 0]...)
 
   rds_runs = merge([for k, s in local.schedules : merge([for db in s.rds_instances : {
-    for action in ["stop", "start"] : "${k}-${db}-${action}" => {
+    for action in ["stop", "start"] : "${k}/rds/${db}/${action}" => {
+      name     = "${k}.rds.${db}.${action}"
       schedule = k
       action   = action
       what     = "RDS instance ${db}"
@@ -53,7 +55,7 @@ resource "aws_scheduler_schedule_group" "this" {
 resource "aws_scheduler_schedule" "this" {
   for_each = local.runs
 
-  name                         = each.key
+  name                         = each.value.name
   group_name                   = aws_scheduler_schedule_group.this[0].name
   description                  = "${var.team}, ${each.value.schedule}: ${each.value.action} ${each.value.what}"
   schedule_expression          = each.value.cron

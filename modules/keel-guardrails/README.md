@@ -40,6 +40,7 @@ The whole framework is in
 | A policy longer than AWS Organizations accepts (SCP 10,240, tag policy 10,000, AI opt-out 2,500 characters) | The API would refuse it at apply |
 | An enabled list without tags, models or regions | A policy that denies everything or nothing |
 | Tag values with more than one `*` | Tag policies allow one wildcard per value |
+| Two required tags differing only in case | A tag policy's key is the tag key without case, one entry per key |
 
 ### Advisory checks
 
@@ -58,10 +59,13 @@ The whole framework is in
 - **The model list is an allow-list by ARN.** Inference profiles pass; the
   model they route to is checked too, in every Region it may route to.
 - **Maximum ten SCPs per target**, the ones already attached included.
+- **Each create action is checked against its own resource.** The untagged
+  SCP has one statement per tag and resource pattern; a single statement
+  would check every action against every resource listed.
 - **The AI opt-out is about content, not access.** It stops AWS keeping the
   organization's content to improve its AI services. It does not stop the
-  services being used: FinOps Agent still reads the bill, and its data still
-  lives in us-east-1 (`keel-billing`, `finops_agent_data_stays_in_the_us`).
+  services being used: FinOps Agent still reads every account's data once set
+  up (`keel-billing`, `finops_agent_is_approved`).
 
 ## Contract outputs
 

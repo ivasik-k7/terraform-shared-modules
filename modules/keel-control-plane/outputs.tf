@@ -87,6 +87,14 @@ output "kms_key_policy_requirements" {
       },
       {
         key        = var.kms_key_arn
+        sid        = "LogsEncryptFirehoseErrors"
+        principals = { services = ["logs.${local.region}.amazonaws.com"], arns = [], roles = [] }
+        actions    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
+        conditions = [{ test = "ArnEquals", variable = "kms:EncryptionContext:aws:logs:arn", values = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:${aws_cloudwatch_log_group.evidence[0].name}"] }]
+        purpose    = "CloudWatch Logs encrypts the evidence stream's error log group."
+      },
+      {
+        key        = var.kms_key_arn
         sid        = "HealthAlarmsToEncryptedTopic"
         principals = { services = ["cloudwatch.amazonaws.com"], arns = [], roles = [] }
         actions    = ["kms:GenerateDataKey", "kms:Decrypt"]
@@ -107,6 +115,7 @@ output "deployer_requirements" {
       "sqs:CreateQueue", "sqs:DeleteQueue", "sqs:SetQueueAttributes", "sqs:GetQueueAttributes", "sqs:TagQueue",
       "firehose:CreateDeliveryStream", "firehose:DeleteDeliveryStream", "firehose:UpdateDestination", "firehose:DescribeDeliveryStream", "firehose:StartDeliveryStreamEncryption", "firehose:TagDeliveryStream",
       "logs:CreateLogGroup", "logs:CreateLogStream", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:AssociateKmsKey",
+      "kms:DescribeKey",
       "iam:CreateRole", "iam:DeleteRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRole", "iam:PassRole", "iam:TagRole",
       "cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:DescribeAlarms", "cloudwatch:TagResource",
     ]
@@ -116,7 +125,7 @@ output "deployer_requirements" {
 output "governance" {
   description = "The control plane's posture as data."
   value = !local.create ? null : {
-    sources             = { organization = var.sources.organization_id, accounts = sort(var.sources.account_ids) }
+    sources             = { organization = var.sources.organization_id, accounts = sort(var.sources.account_ids), principals = var.sources.principal_arn_patterns }
     severity_emails     = { for s in local.severities : s => length(lookup(var.severity.emails, s, [])) }
     silent_severities   = local.silent_severities
     evidence            = { mode = var.evidence.mode, retention_days = var.evidence.retention_days, archive_days = var.evidence.archive_days }

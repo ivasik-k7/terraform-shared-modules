@@ -14,16 +14,15 @@ locals {
 
   # Managed monitors: one per dimension, and one per cost category or tag key.
   managed_monitors = merge(
-    var.anomaly_detection.services ? { services = { dimension = "SERVICE", specification = null } } : {},
-    var.anomaly_detection.linked_accounts ? { accounts = { dimension = "LINKED_ACCOUNT", specification = null } } : {},
-    { for c in var.anomaly_detection.cost_categories : "category-${lower(replace(c, " ", "-"))}" => {
-      dimension     = "COST_CATEGORY"
-      specification = jsonencode({ CostCategories = { Key = c } })
-    } },
-    { for t in var.anomaly_detection.tags : "tag-${lower(replace(t, "/[^A-Za-z0-9-]/", "-"))}" => {
-      dimension     = "TAG"
-      specification = jsonencode({ Tags = { Key = t } })
-    } },
+    var.anomaly_detection.services ? { services = { type = "DIMENSIONAL", dimension = "SERVICE", specification = null } } : {},
+    var.anomaly_detection.linked_accounts ? { accounts = { type = "DIMENSIONAL", dimension = "LINKED_ACCOUNT", specification = null } } : {},
+    merge([for c, values in var.anomaly_detection.cost_category_values : {
+      for v in values : "category-${lower(replace("${c}-${v}", "/[^A-Za-z0-9-]/", "-"))}" => {
+        type          = "CUSTOM"
+        dimension     = null
+        specification = jsonencode({ CostCategories = { Key = c, Values = [v] } })
+      }
+    }]...),
   )
   active_monitors = local.create ? local.managed_monitors : {}
   alert           = local.create && length(local.managed_monitors) > 0 ? var.anomaly_detection.alert.enabled : false
@@ -45,11 +44,7 @@ locals {
 
   spend_limit_keys = sort([for k, l in local.limits : k if contains(["COST", "USAGE"], try(l.type, "COST"))])
 
-  cost_category_names = keys(var.cost_categories)
-  watched_categories  = toset(var.anomaly_detection.cost_categories)
-  unwatched_categories = sort([
-    for c in local.cost_category_names : c if !contains(local.watched_categories, c)
-  ])
+
 
   forward_anomalies = local.alert ? var.signals.control_plane_bus_arn != "" : false
 }

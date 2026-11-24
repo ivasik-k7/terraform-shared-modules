@@ -4,7 +4,7 @@ locals {
 
 # ---------------------------------------------------------------------------
 # FinOps read-only: cost, usage, commitments, recommendations and resource
-# metadata; no object, table, secret or log content
+# metadata; no object, table, secret, configuration or log content
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "finops_read" {
@@ -49,18 +49,29 @@ resource "aws_iam_role_policy" "finops_read" {
         ]
         Resource = "*"
       },
+      # Named actions only: ec2:Describe* includes DescribeInstanceAttribute
+      # (user data), ecs:Describe* DescribeTaskDefinition (environment), and
+      # lambda:GetFunctionConfiguration returns the environment variables.
+      # https://docs.aws.amazon.com/lambda/latest/api/API_GetFunctionConfiguration.html
       {
         Sid    = "ResourceMetadata"
         Effect = "Allow"
         Action = [
           "tag:GetResources", "tag:GetTagKeys", "tag:GetTagValues",
-          "ec2:Describe*", "autoscaling:Describe*", "elasticloadbalancing:Describe*",
-          "rds:Describe*", "rds:ListTagsForResource", "ecs:Describe*", "ecs:List*", "eks:Describe*", "eks:List*",
-          "lambda:ListFunctions", "lambda:GetFunctionConfiguration", "s3:ListAllMyBuckets", "s3:GetBucketTagging",
-          "s3:GetLifecycleConfiguration", "s3:GetBucketLocation", "dynamodb:DescribeTable", "dynamodb:ListTables",
+          "ec2:DescribeInstances", "ec2:DescribeInstanceTypes", "ec2:DescribeVolumes", "ec2:DescribeSnapshots",
+          "ec2:DescribeAddresses", "ec2:DescribeNatGateways", "ec2:DescribeVpcEndpoints", "ec2:DescribeReservedInstances",
+          "autoscaling:DescribeAutoScalingGroups",
+          "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:DescribeTargetGroups",
+          "rds:DescribeDBInstances", "rds:DescribeDBClusters", "rds:DescribeDBSnapshots", "rds:DescribeDBClusterSnapshots",
+          "rds:DescribeReservedDBInstances", "rds:ListTagsForResource",
+          "ecs:ListClusters", "ecs:DescribeClusters", "ecs:ListServices", "ecs:DescribeServices",
+          "eks:ListClusters", "eks:DescribeCluster", "eks:ListNodegroups", "eks:DescribeNodegroup",
+          "s3:ListAllMyBuckets", "s3:GetBucketTagging", "s3:GetLifecycleConfiguration", "s3:GetBucketLocation",
+          "dynamodb:ListTables", "dynamodb:DescribeTable",
           "bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile", "bedrock:ListFoundationModels",
-          "logs:DescribeLogGroups", "cloudwatch:GetMetricData", "cloudwatch:GetMetricStatistics", "cloudwatch:ListMetrics",
-          "cloudwatch:DescribeAlarms", "support:DescribeTrustedAdvisor*",
+          "logs:DescribeLogGroups",
+          "cloudwatch:GetMetricData", "cloudwatch:GetMetricStatistics", "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
+          "support:DescribeTrustedAdvisorChecks", "support:DescribeTrustedAdvisorCheckResult", "support:DescribeTrustedAdvisorCheckSummaries",
         ]
         Resource = "*"
       },

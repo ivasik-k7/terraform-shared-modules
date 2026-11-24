@@ -7,16 +7,29 @@ mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
   }
+  # modules/s3 reads its Region from the endpoint.
   mock_data "aws_region" {
-    defaults = { region = "eu-west-2" }
+    defaults = { region = "eu-west-2", endpoint = "ec2.eu-west-2.amazonaws.com" }
   }
   mock_data "aws_caller_identity" {
     defaults = { account_id = "333333333333" }
   }
+  mock_resource "aws_sns_topic" {
+    override_during = plan
+    defaults        = { arn = "arn:aws:sns:eu-west-2:333333333333:keel-mock" }
+  }
+  mock_resource "aws_cloudwatch_event_bus" {
+    override_during = plan
+    defaults        = { arn = "arn:aws:events:eu-west-2:333333333333:event-bus/keel" }
+  }
 }
 
+# A fully configured baseline: a customer key, and access logging
+# acknowledged because this module exposes no log target for the bucket.
 variables {
-  sources = { organization_id = "o-abcdefghij" }
+  kms_key_arn         = "arn:aws:kms:eu-west-2:333333333333:key/11111111-2222-3333-4444-555555555555"
+  acknowledged_checks = ["access_is_logged"]
+  sources             = { organization_id = "o-abcdefghij" }
   severity = {
     emails = { warning = ["finops@example.com"], high = ["finops@example.com"], critical = ["oncall@example.com"] }
   }
@@ -63,6 +76,11 @@ run "signals_are_routed_at_the_severity_of_their_topic" {
     condition     = length(aws_cloudwatch_event_rule.signal) == 4
     error_message = "one rule per severity."
   }
+
+  assert {
+    condition     = aws_cloudwatch_event_target.signal["high"].input_transformer[0].input_paths["message"] == "$.detail.sns.Message"
+    error_message = "the message is read from the SNS envelope keel-signals puts in detail.sns."
+  }
 }
 
 run "every_event_is_kept_in_a_locked_bucket" {
@@ -84,7 +102,14 @@ run "the_organization_may_send" {
 
   assert {
     condition     = jsondecode(aws_cloudwatch_event_bus_policy.this[0].policy).Statement[0].Condition.StringEquals["aws:PrincipalOrgID"] == "o-abcdefghij"
-    error_message = "every account in the organization may put events, and no one else."
+    error_message = "accounts in the organization may put events."
+  }
+
+  assert {
+    # Without it any role in the organization could page CRITICAL and write
+    # a record the evidence lock keeps.
+    condition     = jsonencode(jsondecode(aws_cloudwatch_event_bus_policy.this[0].policy).Statement[0].Condition.ArnLike["aws:PrincipalArn"]) == jsonencode(["arn:*:iam::*:role/*-signal-forward-*"])
+    error_message = "only keel-signals' forwarding roles may put events."
   }
 }
 

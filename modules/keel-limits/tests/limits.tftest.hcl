@@ -12,10 +12,12 @@ mock_provider "aws" {
     defaults = { account_id = "111111111111" }
   }
   mock_resource "aws_iam_role" {
-    defaults = { arn = "arn:aws:iam::111111111111:role/mock" }
+    override_during = plan
+    defaults        = { arn = "arn:aws:iam::111111111111:role/mock" }
   }
   mock_resource "aws_iam_policy" {
-    defaults = { arn = "arn:aws:iam::111111111111:policy/mock" }
+    override_during = plan
+    defaults        = { arn = "arn:aws:iam::111111111111:policy/mock" }
   }
 }
 
@@ -187,10 +189,66 @@ run "a_severity_without_a_topic_warns" {
 
   variables {
     topic_arns = { warning = "arn:aws:sns:eu-west-2:111111111111:lending-warning" }
-    limits     = { account = { amount = "100000" } }
+    limits     = { account = { amount = "100000", owners = ["owner@example.com"] } }
   }
 
   expect_failures = [check.every_limit_has_an_owner]
+}
+
+run "a_threshold_nobody_receives_is_refused" {
+  # AWS Budgets refuses a notification with no subscriber, at apply.
+  command = plan
+
+  variables {
+    topic_arns          = { warning = "arn:aws:sns:eu-west-2:111111111111:lending-warning" }
+    limits              = { account = { amount = "100000" } }
+    acknowledged_checks = ["every_limit_has_an_owner"]
+  }
+
+  expect_failures = [aws_budgets_budget.spend["account"]]
+}
+
+run "a_lock_reaches_roles_under_a_path" {
+  # A role at a path has an ARN role/<path>/<name>; a policy on role/<name>
+  # alone left the lock unable to attach.
+  command = plan
+
+  assert {
+    condition     = contains(jsondecode(aws_iam_role_policy.lock["dev"].policy).Statement[0].Resource, "arn:aws:iam::111111111111:role/*/developer")
+    error_message = "the lock may attach to the named role at any path."
+  }
+}
+
+run "aws_budgets_assumes_the_action_role_only_for_this_accounts_budgets" {
+  command = plan
+
+  assert {
+    condition     = jsondecode(aws_iam_role.action["dev"].assume_role_policy).Statement[0].Condition.ArnLike["aws:SourceArn"] == "arn:aws:budgets::111111111111:budget/*"
+    error_message = "the trust names the budgets, as AWS's example does."
+  }
+}
+
+run "a_commitment_limit_on_a_tag_is_rejected" {
+  # A commitment budget filters on services and accounts only; a tag scope
+  # was dropped and the whole account measured.
+  command = plan
+
+  variables {
+    limits = { sp = { type = "SAVINGS_PLANS_COVERAGE", target_percent = 80, scope = { tags = { Platform = ["ledger"] } } } }
+  }
+
+  expect_failures = [var.limits]
+}
+
+run "a_cost_category_monitor_on_two_values_is_refused" {
+  # A customer managed monitor tracks one cost category value.
+  command = plan
+
+  variables {
+    limits = { units = { amount = "1", scope = { cost_categories = { BusinessUnit = ["lending", "payments"] } }, anomaly = {} } }
+  }
+
+  expect_failures = [aws_ce_anomaly_monitor.this["units"]]
 }
 
 run "create_false_plans_nothing" {

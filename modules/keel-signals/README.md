@@ -23,16 +23,24 @@ module "signals" {
 ## How a signal travels
 
 1. A budget threshold publishes to the severity topic.
-2. The topic delivers to the module's SQS queue.
-3. One EventBridge pipe per severity takes the messages of its topic from the
-   queue. The pipe puts each on the account's default bus as source
-   `keel.<severity>`, detail type `Keel Signal`.
-4. A rule on the default bus forwards `keel.*` to the control plane bus. It
-   may be in another account or Region.
+2. The topic delivers to its own SQS queue.
+3. That queue's pipe puts the message on the account's default bus: source
+   `keel.<severity>`, detail type `Keel Signal`, the SNS envelope in
+   `detail.sns`, the queue in `resources`.
+4. A rule on the default bus forwards this instance's `keel.*` events (matched
+   on `resources`) to the control plane bus, in this or another account and
+   Region.
 
-The detour through the default bus exists because a pipe can target only the
-default bus of its own account and Region. Alarms and Anomaly Detected events
-can be forwarded as they are too (`forward`).
+Each severity has its own queue because a pipe deletes the SQS messages its
+filter does not match; pipes sharing a queue lose each other's signals. The
+detour through the default bus exists because a pipe can target only the
+default bus of its own account and Region. Alarms entering ALARM and Anomaly
+Detected events can be forwarded as they are too (`forward`).
+
+A message the pipe fails five times moves to `<name>-signals-undelivered`;
+`<name>-signals-undelivered` and `<name>-signals-stalled` (a signal waiting
+over 15 minutes) alarm on the HIGH topic, which reaches the owners by e-mail
+even when the pipes cannot.
 
 ## Requirements
 
@@ -59,6 +67,8 @@ can be forwarded as they are too (`forward`).
 - **Forwarded alarms and topic signals are two paths.** An alarm that
   notifies a severity topic *and* matches `forward.alarm_name_prefixes`
   reaches the control plane twice. Use one or the other per alarm.
+- **Several instances per account and Region are fine.** Each forwards only
+  its own queues' events; `name` must differ.
 
 ## Contract outputs
 
@@ -66,7 +76,7 @@ can be forwarded as they are too (`forward`).
 |---|---|
 | `topic_arns` | `keel-limits`, and every alarm that should reach owners |
 | `forwarding` | Reviewers: what leaves the account |
-| `kms_key_policy_requirements` | The key owner |
+| `kms_key_policy_requirements` | The key owner: the publishing services, SNS to the queues, and the pipes' role |
 | `verify_commands` | Operators |
 
 ## Limits
@@ -74,8 +84,8 @@ can be forwarded as they are too (`forward`).
 - **Never applied against real AWS.** The open points are in
   [../keel-billing/docs/RESEARCH.md](../keel-billing/docs/RESEARCH.md). Among
   them:
-  - pipes parsing the SNS envelope in the SQS body, so the `TopicArn` filter
-    matches;
+  - the pipe's input template carrying the parsed SNS envelope into
+    `detail.sns` (documented for SQS bodies, never observed);
   - cross-account and cross-Region forwarding.
 
 ## Versioning and support

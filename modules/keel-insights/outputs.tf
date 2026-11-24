@@ -23,6 +23,8 @@ output "source_requirements" {
   value = !local.create ? null : {
     enabled                = true
     destination_account_id = local.account_id
+    region                 = local.region
+    template_url_prefix    = var.templates.url_prefix
     version                = var.data_exports.version
     resource_prefix        = var.data_exports.resource_prefix
     cur2                   = var.data_exports.cur2
@@ -65,12 +67,24 @@ output "governance" {
   }
 }
 
+output "templates" {
+  description = "Each CID template this module deploys: its URL and the sha256 of the copy reviewed for the module (null for a version nobody reviewed). Compare before an upgrade, or before mirroring (verify_commands.template_*)."
+  value = !local.create ? null : { for k, p in local.template_paths : k => {
+    url             = local.templates[k]
+    reviewed_sha256 = lookup(local.reviewed_sha256, p, null)
+  } }
+}
+
 output "verify_commands" {
   description = "Read-only commands to run from CloudShell in this account after an apply."
   value = !local.create ? null : {
-    exports_arriving = "aws s3 ls s3://${local.data_bucket}/ --recursive | tail -5"
-    tables           = "aws glue get-tables --database-name ${replace(var.data_exports.resource_prefix, "-", "_")}_data_export --query 'TableList[].Name'"
-    stacks           = "aws cloudformation describe-stacks --query \"Stacks[?starts_with(StackName, '${var.name}-cid')].[StackName,StackStatus]\" --output table"
-    dashboards       = "aws quicksight list-dashboards --aws-account-id ${local.account_id} --query 'DashboardSummaryList[].[Name,LastPublishedTime]' --output table"
+    exports_arriving      = "aws s3 ls s3://${local.data_bucket}/ --recursive | tail -5"
+    tables                = "aws glue get-tables --database-name ${replace(var.data_exports.resource_prefix, "-", "_")}_data_export --query 'TableList[].Name'"
+    stacks                = "aws cloudformation describe-stacks --query \"Stacks[?starts_with(StackName, '${var.name}-cid')].[StackName,StackStatus]\" --output table"
+    dashboards            = "aws quicksight list-dashboards --aws-account-id ${local.account_id} --query 'DashboardSummaryList[].[Name,LastPublishedTime]' --output table"
+    export_data_size      = "aws cloudwatch get-metric-statistics --region ${local.region} --namespace AWS/S3 --metric-name BucketSizeBytes --dimensions Name=BucketName,Value=${local.data_bucket} Name=StorageType,Value=StandardStorage --start-time $(date -u -d '-35 days' +%FT%TZ) --end-time $(date -u +%FT%TZ) --period 86400 --statistics Average --query 'sort_by(Datapoints,&Timestamp)[].[Timestamp,Average]' --output table"
+    template_data_exports = lookup(local.reviewed_sha256, local.template_paths.data_exports, null) == null ? "curl -fsS ${local.templates.data_exports} | sha256sum   # an unreviewed version: review it, then record its hash" : "test \"$(curl -fsS ${local.templates.data_exports} | sha256sum | cut -d' ' -f1)\" = ${local.reviewed_sha256[local.template_paths.data_exports]} && echo reviewed || echo CHANGED"
+    template_dashboards   = lookup(local.reviewed_sha256, local.template_paths.dashboards, null) == null ? "curl -fsS ${local.templates.dashboards} | sha256sum   # an unreviewed version: review it, then record its hash" : "test \"$(curl -fsS ${local.templates.dashboards} | sha256sum | cut -d' ' -f1)\" = ${local.reviewed_sha256[local.template_paths.dashboards]} && echo reviewed || echo CHANGED"
+    template_plugin       = lookup(local.reviewed_sha256, local.template_paths.plugin, null) == null ? "curl -fsS ${local.templates.plugin} | sha256sum   # an unreviewed version: review it, then record its hash" : "test \"$(curl -fsS ${local.templates.plugin} | sha256sum | cut -d' ' -f1)\" = ${local.reviewed_sha256[local.template_paths.plugin]} && echo reviewed || echo CHANGED"
   }
 }

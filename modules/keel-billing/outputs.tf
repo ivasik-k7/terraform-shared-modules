@@ -33,8 +33,13 @@ output "billing_view_arns" {
 }
 
 output "data_exports_stack" {
-  description = "The CID data exports source stack: { name, outputs }. Null unless data_exports.enabled."
-  value       = !local.create || !var.data_exports.enabled ? null : { name = aws_cloudformation_stack.data_exports_source[0].name, outputs = aws_cloudformation_stack.data_exports_source[0].outputs }
+  description = "The CID data exports source stack: { name, outputs, template_url, reviewed_sha256 }, the last the sha256 of the template copy reviewed for this module (null for an unreviewed version). Null unless data_exports.enabled."
+  value = !local.create || !var.data_exports.enabled ? null : {
+    name            = aws_cloudformation_stack.data_exports_source[0].name
+    outputs         = aws_cloudformation_stack.data_exports_source[0].outputs
+    template_url    = aws_cloudformation_stack.data_exports_source[0].template_url
+    reviewed_sha256 = local.data_exports_reviewed_sha256
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -78,6 +83,53 @@ output "controls" {
   )
 }
 
+output "finops_agent_setup" {
+  description = "How the management account turns on AWS FinOps Agent's organization access, which Terraform cannot complete: the steps, the IAM policy the person doing it needs, and what the agent can then read. Null unless finops_agent.enabled."
+  value = !local.finops_agent ? null : {
+    console_region = "us-east-1"
+    steps = concat(
+      [
+        "Acknowledge finops_agent_is_approved here once the data access below is approved.",
+        "In the management account, us-east-1, open the AWS FinOps Agent console and enable organization-wide access. It creates AWSServiceRoleForFinOpsAgent and turns on trusted access with AWS Organizations.",
+      ],
+      var.finops_agent.delegated_admin_account_id == "" ? [] : [
+        "Register ${var.finops_agent.delegated_admin_account_id} as the agent's delegated administrator: aws organizations register-delegated-administrator --account-id ${var.finops_agent.delegated_admin_account_id} --service-principal finops-agent.amazonaws.com",
+      ],
+      ["Check: aws organizations list-delegated-administrators --service-principal finops-agent.amazonaws.com"],
+    )
+    management_account_policy = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat(
+        [
+          { Sid = "OrganizationAccess", Effect = "Allow", Action = ["finops-agent:GetOrganizationAccess", "finops-agent:UpdateOrganizationAccess"], Resource = "*" },
+          {
+            Sid       = "TrustedAccess"
+            Effect    = "Allow"
+            Action    = "organizations:EnableAWSServiceAccess"
+            Resource  = "*"
+            Condition = { StringEquals = { "organizations:ServicePrincipal" = "finops-agent.amazonaws.com" } }
+          },
+          {
+            Sid       = "ServiceLinkedRole"
+            Effect    = "Allow"
+            Action    = "iam:CreateServiceLinkedRole"
+            Resource  = "*"
+            Condition = { StringEquals = { "iam:AWSServiceName" = "finops-agent.amazonaws.com" } }
+          },
+        ],
+        var.finops_agent.delegated_admin_account_id == "" ? [] : [{
+          Sid       = "DelegatedAdministrator"
+          Effect    = "Allow"
+          Action    = ["organizations:RegisterDelegatedAdministrator", "organizations:ListDelegatedAdministrators"]
+          Resource  = "*"
+          Condition = { StringEquals = { "organizations:ServicePrincipal" = "finops-agent.amazonaws.com" } }
+        }],
+      )
+    })
+    reads = "Every member account's cost, usage and resource data, CloudTrail events, CloudWatch metrics and CloudWatch Logs configuration (not log events), through a service-linked role SCPs do not restrict. Everyone who can use the organization-wide agent reads all of it; no account can be excluded."
+  }
+}
+
 output "kms_key_policy_requirements" {
   description = "What the customer managed key in signals.kms_key_arn must allow, in contract version 2: the severity topics and queue (keel-signals) and the anomaly alert topic."
   value = !local.create || var.signals.kms_key_arn == "" ? null : concat(
@@ -109,8 +161,6 @@ output "deployer_requirements" {
       ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:TagRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:PassRole", "iam:CreatePolicy", "iam:DeletePolicy"],
       length(local.billing_views) == 0 ? [] : ["billing:CreateBillingView", "billing:UpdateBillingView", "billing:DeleteBillingView", "billing:GetBillingView", "billing:ListBillingViews", "billing:TagResource"],
       length(local.shared_views) == 0 ? [] : ["ram:CreateResourceShare", "ram:DeleteResourceShare", "ram:AssociateResourceShare", "ram:DisassociateResourceShare", "ram:GetResourceShares", "ram:TagResource"],
-      !local.finops_agent ? [] : ["organizations:EnableAWSServiceAccess", "organizations:DisableAWSServiceAccess", "organizations:ListAWSServiceAccessForOrganization"],
-      !local.finops_agent_admin ? [] : ["organizations:RegisterDelegatedAdministrator", "organizations:DeregisterDelegatedAdministrator", "organizations:ListDelegatedAdministrators"],
       var.data_exports.enabled ? ["cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack", "cloudformation:DescribeStacks", "plus what the CID data exports template creates: IAM roles, S3, BCM Data Exports, Lambda"] : [],
     )
     service_linked_roles = var.optimization.compute_optimizer || var.optimization.cost_optimization_hub ? ["Compute Optimizer and Cost Optimization Hub create their own service-linked roles on enrollment"] : []
@@ -122,13 +172,12 @@ output "governance" {
   value = !local.create ? null : {
     cost_allocation_tags   = sort(var.cost_allocation_tags)
     cost_categories        = sort(keys(var.cost_categories))
-    unwatched_categories   = local.unwatched_categories
     inactive_category_tags = local.inactive_category_tags
     anomaly_monitors       = sort(keys(local.active_monitors))
     anomaly_alerts         = { for k, a in local.subscriptions : k => "${a.frequency} at ${a.min_impact_absolute}${a.min_impact_percentage > 0 ? " and ${a.min_impact_percentage}%" : ""}" }
     limits                 = module.limits.governance
     billing_views          = { for k, v in local.billing_views : k => { filter = length(v.accounts) > 0 ? "accounts ${join(", ", v.accounts)}" : "${v.tag.key} = ${join(" | ", v.tag.values)}", shared_with = sort(v.share_with) } }
-    finops_agent           = !local.finops_agent ? null : { administrator = local.finops_agent_admin ? var.finops_agent.delegated_admin_account_id : local.account_id, data_location = "us-east-1; inference in the US geography" }
+    finops_agent           = !local.finops_agent ? null : { administrator = var.finops_agent.delegated_admin_account_id != "" ? var.finops_agent.delegated_admin_account_id : local.account_id, runs_in = "us-east-1", set_up_by = "the agent's console (output.finops_agent_setup)" }
     cost_optimization_hub  = var.optimization.cost_optimization_hub
     compute_optimizer      = var.optimization.compute_optimizer
     to_control_plane       = var.signals.control_plane_bus_arn != ""
@@ -148,6 +197,7 @@ output "verify_commands" {
     optimization_hub  = "aws cost-optimization-hub list-enrollment-statuses --include-organization-info"
     compute_optimizer = "aws compute-optimizer get-enrollment-status"
     data_exports      = "aws bcm-data-exports list-exports --region us-east-1"
+    template          = !var.data_exports.enabled ? null : (local.data_exports_reviewed_sha256 == null ? "curl -fsS ${var.data_exports.template_url_prefix}/${local.data_exports_template} | sha256sum   # an unreviewed version: review it, then record its hash" : "test \"$(curl -fsS ${var.data_exports.template_url_prefix}/${local.data_exports_template} | sha256sum | cut -d' ' -f1)\" = ${local.data_exports_reviewed_sha256} && echo reviewed || echo CHANGED")
     billing_views     = "aws billing list-billing-views --region us-east-1 --query 'billingViews[].[name,billingViewType,arn]' --output table"
     finops_agent      = "aws organizations list-delegated-administrators --service-principal finops-agent.amazonaws.com"
   }

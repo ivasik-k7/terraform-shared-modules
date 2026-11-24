@@ -6,7 +6,7 @@ variable "create" {
 }
 
 variable "name" {
-  description = "Prefix of what the module names: the severity topics <name>-<severity>, the queue, the pipes and the forwarding rules."
+  description = "Prefix of what the module names: the severity topics <name>-<severity>, the queues, the pipes, the alarms and the forwarding rules. Unique per account and Region."
   type        = string
   nullable    = false
 

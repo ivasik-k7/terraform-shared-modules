@@ -19,13 +19,6 @@ check "somebody_hears_an_anomaly" {
   }
 }
 
-check "every_cost_category_is_watched" {
-  assert {
-    condition     = !local.create ? true : (contains(local.acknowledged, "every_cost_category_is_watched") ? true : length(local.unwatched_categories) == 0)
-    error_message = "Cost categories with no anomaly monitor: ${join(", ", local.unwatched_categories)}. A spike in one of their values is seen only as part of the account or service it lands in. List them in anomaly_detection.cost_categories. ${local.ack_hint}"
-  }
-}
-
 check "spend_is_allocated_by_tags" {
   assert {
     condition     = !local.create ? true : (contains(local.acknowledged, "spend_is_allocated_by_tags") ? true : length(local.inactive_category_tags) == 0)
@@ -47,11 +40,10 @@ check "commitments_are_watched" {
   }
 }
 
-# The agent stores its data in us-east-1 and infers within the US geography.
-# https://docs.aws.amazon.com/finops-agent/latest/userguide/what-is.html
-check "finops_agent_data_stays_in_the_us" {
+# https://docs.aws.amazon.com/finops-agent/latest/userguide/setting-up-organization-access.html
+check "finops_agent_is_approved" {
   assert {
-    condition     = !local.finops_agent ? true : contains(local.acknowledged, "finops_agent_data_stays_in_the_us")
-    error_message = "FinOps Agent is on: it reads the organization's cost and resource data, keeps what it stores in us-east-1 and runs inference in the US, whichever Regions the workloads are in. Acknowledge it once the data-residency approval exists. ${local.ack_hint}"
+    condition     = !local.finops_agent ? true : contains(local.acknowledged, "finops_agent_is_approved")
+    error_message = "FinOps Agent is chosen: organization-wide it reads every member account's cost, resource and operational data (CloudTrail events, CloudWatch metrics) through a role SCPs do not restrict, everyone who can use it reads all of it, no account can be excluded, and it runs in us-east-1. Acknowledge it once that is approved, then follow output.finops_agent_setup. ${local.ack_hint}"
   }
 }
